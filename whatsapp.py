@@ -54,7 +54,7 @@ def _send_message_sync(to: str, text: str) -> None:
     }
     with httpx.Client(timeout=15) as client:
         for chunk in _chunk(_strip_markdown(text)):
-            logger.info(f"Sending WhatsApp chunk to {to} (sync): {chunk[:50]}...")
+            print(f">>> Sending WhatsApp chunk to {to} (sync): {chunk[:20]}...", flush=True)
             resp = client.post(url, headers=headers, json={
                 "messaging_product": "whatsapp",
                 "recipient_type": "individual",
@@ -62,9 +62,9 @@ def _send_message_sync(to: str, text: str) -> None:
                 "type": "text",
                 "text": {"body": chunk, "preview_url": False},
             })
-            logger.info(f"WhatsApp API Status (sync): {resp.status_code}")
+            print(f">>> WhatsApp API Status (sync): {resp.status_code}", flush=True)
             if resp.status_code >= 400:
-                logger.error(f"WhatsApp API Error Body (sync): {resp.text}")
+                print(f">>> WhatsApp API Error Body (sync): {resp.text}", flush=True)
 
 
 async def _send_message(to: str, text: str) -> None:
@@ -76,7 +76,7 @@ async def _send_message(to: str, text: str) -> None:
     }
     async with httpx.AsyncClient(timeout=15) as client:
         for chunk in _chunk(_strip_markdown(text)):
-            logger.info(f"Sending WhatsApp chunk to {to} (async): {chunk[:50]}...")
+            print(f">>> Sending WhatsApp chunk to {to} (async): {chunk[:20]}...", flush=True)
             resp = await client.post(url, headers=headers, json={
                 "messaging_product": "whatsapp",
                 "recipient_type": "individual",
@@ -84,9 +84,9 @@ async def _send_message(to: str, text: str) -> None:
                 "type": "text",
                 "text": {"body": chunk, "preview_url": False},
             })
-            logger.info(f"WhatsApp API Status (async): {resp.status_code}")
+            print(f">>> WhatsApp API Status (async): {resp.status_code}", flush=True)
             if resp.status_code >= 400:
-                logger.error(f"WhatsApp API Error Body (async): {resp.text}")
+                print(f">>> WhatsApp API Error Body (async): {resp.text}", flush=True)
 
 
 def _run_agent(sender: str, session_id: str, text: str) -> None:
