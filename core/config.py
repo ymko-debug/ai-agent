@@ -8,6 +8,12 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 TAVILY_API_KEY     = os.environ.get("TAVILY_API_KEY", "")
 NVIDIA_API_KEY     = os.environ.get("NVIDIA_API_KEY", "")
 
+# ── WhatsApp API (Meta Cloud) ──────────────────────────────────────────────────
+WA_TOKEN        = os.getenv("WA_TOKEN", "")
+WA_PHONE_ID     = os.getenv("WA_PHONE_ID", "")
+WA_APP_SECRET   = os.getenv("WA_APP_SECRET", "")
+WA_VERIFY_TOKEN = os.getenv("WA_VERIFY_TOKEN", "")
+
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
 # ── Model Configs ─────────────────────────────────────────────────────────────

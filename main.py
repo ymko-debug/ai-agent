@@ -66,7 +66,10 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates", cache_size=0)
+from jinja2 import Environment, FileSystemLoader
+_jinja_env = Environment(loader=FileSystemLoader("templates"), cache_size=0)
+templates = Jinja2Templates(env=_jinja_env)
+
 
 # ── Global task store ──────────────────────────────────────────────────────────
 # {session_id: {status, answer, provider, search_label, done, error}}

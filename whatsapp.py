@@ -5,14 +5,10 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
 from core.agent import process_user_message
 from core.db import save_message
+from core.config import WA_TOKEN, WA_PHONE_ID, WA_APP_SECRET, WA_VERIFY_TOKEN
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-WA_TOKEN        = os.environ["WA_TOKEN"]
-WA_PHONE_ID     = os.environ["WA_PHONE_ID"]
-WA_APP_SECRET   = os.environ["WA_APP_SECRET"]
-WA_VERIFY_TOKEN = os.environ["WA_VERIFY_TOKEN"]
 
 _seen_ids: Set[str] = set()
 
@@ -58,13 +54,17 @@ async def _send_message(to: str, text: str) -> None:
     }
     async with httpx.AsyncClient(timeout=15) as client:
         for chunk in _chunk(_strip_markdown(text)):
-            await client.post(url, headers=headers, json={
+            logger.info(f"Sending WhatsApp chunk to {to}: {chunk[:50]}...")
+            resp = await client.post(url, headers=headers, json={
                 "messaging_product": "whatsapp",
                 "recipient_type": "individual",
                 "to": to,
                 "type": "text",
                 "text": {"body": chunk, "preview_url": False},
             })
+            logger.info(f"WhatsApp API Status: {resp.status_code}")
+            if resp.status_code >= 400:
+                logger.error(f"WhatsApp API Error Body: {resp.text}")
 
 
 async def _run_agent(sender: str, session_id: str, text: str) -> None:
@@ -80,10 +80,11 @@ async def _run_agent(sender: str, session_id: str, text: str) -> None:
             ),
         )
         answer = result["answer"]
+        logger.info(f"Agent finished processing for {sender}. Saving and sending reply.")
         await loop.run_in_executor(None, save_message, session_id, "assistant", answer)
         await _send_message(sender, answer)
     except Exception as e:
-        logger.exception("Agent error: %s", e)
+        logger.exception("Agent error during WhatsApp process: %s", e)
         await _send_message(sender, "Sorry, something went wrong. Please try again.")
 
 
@@ -93,6 +94,10 @@ def verify_webhook(
     hub_challenge: str = Query(None, alias="hub.challenge"),
     hub_verify_token: str = Query(None, alias="hub.verify_token"),
 ):
+    if not all([WA_TOKEN, WA_PHONE_ID, WA_APP_SECRET, WA_VERIFY_TOKEN]):
+        logger.warning("WhatsApp credentials missing. Rejecting webhook.")
+        raise HTTPException(status_code=503, detail="WhatsApp integration not configured.")
+
     if hub_mode == "subscribe" and hub_verify_token == WA_VERIFY_TOKEN:
         return Response(content=hub_challenge, media_type="text/plain")
     raise HTTPException(status_code=403)
@@ -100,6 +105,9 @@ def verify_webhook(
 
 @router.post("/whatsapp")
 async def receive_message(request: Request, background_tasks: BackgroundTasks):
+    if not all([WA_TOKEN, WA_PHONE_ID, WA_APP_SECRET, WA_VERIFY_TOKEN]):
+        raise HTTPException(status_code=503, detail="WhatsApp integration not configured.")
+
     body = await request.body()
     sig = request.headers.get("X-Hub-Signature-256", "")
     if not _verify_signature(body, sig):
@@ -119,12 +127,14 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
             _seen_ids.clear()
         if msg.get("type") != "text":
             return Response(status_code=200)
+        logger.info(f"Received WhatsApp message from {sender}: {text[:50]}...")
         sender = msg["from"]
         text = msg["text"]["body"]
         session_id = f"wa_{sender}"
         await asyncio.get_event_loop().run_in_executor(
             None, save_message, session_id, "user", text
         )
+        logger.info(f"Adding agent task for session {session_id}")
         background_tasks.add_task(_run_agent, sender, session_id, text)
     except (KeyError, IndexError):
         pass
