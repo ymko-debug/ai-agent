@@ -127,9 +127,10 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
             _seen_ids.clear()
         if msg.get("type") != "text":
             return Response(status_code=200)
-        logger.info(f"Received WhatsApp message from {sender}: {text[:50]}...")
         sender = msg["from"]
         text = msg["text"]["body"]
+        logger.info(f"Received WhatsApp message from {sender}: {text[:50]}...")
+
         session_id = f"wa_{sender}"
         await asyncio.get_event_loop().run_in_executor(
             None, save_message, session_id, "user", text

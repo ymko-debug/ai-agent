@@ -110,8 +110,8 @@ async def root(request: Request):
     sessions     = list_sessions()
     session_names = get_all_session_names(sessions)
     new_sid      = f"session_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    return templates.TemplateResponse("index.html", {
-        "request":      request,
+    return templates.TemplateResponse(request, "index.html", {
+
         "sessions":     sessions,
         "session_names": session_names,
         "new_sid":      new_sid,
