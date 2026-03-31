@@ -61,5 +61,5 @@ fastapi
 uvicorn[standard]
 websockets
 python-multipart
-jinja2
-httpx
+jinja2>=3.1.5
+httpx
