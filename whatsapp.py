@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, hashlib, hmac, logging, os, re
+import asyncio, hashlib, hmac, logging, os, re, json
 from typing import Set
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
@@ -105,39 +105,52 @@ def verify_webhook(
 
 @router.post("/whatsapp")
 async def receive_message(request: Request, background_tasks: BackgroundTasks):
+    logger.info("WhatsApp webhook hit (POST)")
     if not all([WA_TOKEN, WA_PHONE_ID, WA_APP_SECRET, WA_VERIFY_TOKEN]):
+        logger.warning("WhatsApp integration missing credentials in receive_message")
         raise HTTPException(status_code=503, detail="WhatsApp integration not configured.")
 
     body = await request.body()
     sig = request.headers.get("X-Hub-Signature-256", "")
     if not _verify_signature(body, sig):
+        logger.warning("WhatsApp signature verification failed")
         raise HTTPException(status_code=403)
 
     payload = await request.json()
+    logger.info(f"WhatsApp payload received: {json.dumps(payload)[:500]}")
     try:
         changes = payload["entry"][0]["changes"][0]["value"]
         if "messages" not in changes:
+            logger.info("No messages in WhatsApp payload changes")
             return Response(status_code=200)
+        
         msg = changes["messages"][0]
         msg_id = msg.get("id", "")
         if msg_id in _seen_ids:
+            logger.info(f"Already processed message {msg_id}, skipping")
             return Response(status_code=200)
+        
         _seen_ids.add(msg_id)
         if len(_seen_ids) > 10_000:
             _seen_ids.clear()
+            
         if msg.get("type") != "text":
+            logger.info(f"Skipping non-text message type: {msg.get('type')}")
             return Response(status_code=200)
+            
         sender = msg["from"]
-        text = msg["text"]["body"]
-        logger.info(f"Received WhatsApp message from {sender}: {text[:50]}...")
-
+        text = msg.get("text", {}).get("body", "")
+        logger.info(f"Processing message from {sender}: {text[:50]}...")
+        
         session_id = f"wa_{sender}"
         await asyncio.get_event_loop().run_in_executor(
             None, save_message, session_id, "user", text
         )
-        logger.info(f"Adding agent task for session {session_id}")
+        logger.info(f"Queuing background task _run_agent for {session_id}")
         background_tasks.add_task(_run_agent, sender, session_id, text)
-    except (KeyError, IndexError):
-        pass
+        
+    except Exception as e:
+        logger.exception(f"Error parsing WhatsApp payload: {e}")
 
     return Response(status_code=200)
+
