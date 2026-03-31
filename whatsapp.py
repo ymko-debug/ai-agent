@@ -1,4 +1,4 @@
-import asyncio, hashlib, hmac, logging, os, re, json, threading, sys
+import asyncio, hashlib, hmac, logging, os, re, json, threading, sys, traceback
 
 from typing import Set
 import httpx
@@ -47,72 +47,66 @@ def _chunk(text: str, size: int = 4096) -> list[str]:
 
 
 def _send_message_sync(to: str, text: str) -> None:
-    url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages"
+    # Using v18.0 as per user's proven suggestion
+    url = f"https://graph.facebook.com/v18.0/{WA_PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WA_TOKEN}",
         "Content-Type": "application/json",
     }
-    with httpx.Client(timeout=15) as client:
-        for chunk in _chunk(_strip_markdown(text)):
-            print(f">>> Sending WhatsApp chunk to {to} (sync): {chunk[:20]}...", flush=True)
-            resp = client.post(url, headers=headers, json={
-                "messaging_product": "whatsapp",
-                "recipient_type": "individual",
-                "to": to,
-                "type": "text",
-                "text": {"body": chunk, "preview_url": False},
-            })
-            print(f">>> WhatsApp API Status (sync): {resp.status_code}", flush=True)
+    with httpx.Client(timeout=30) as client:
+        # Simplified payload as per user's suggestion
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "text",
+            "text": {"body": text}
+        }
+        print(f">>> Sending WhatsApp reply to {to}: {text[:50]}...", flush=True)
+        try:
+            resp = client.post(url, headers=headers, json=payload)
+            print(f">>> WhatsApp API Status: {resp.status_code}", flush=True)
             if resp.status_code >= 400:
-                print(f">>> WhatsApp API Error Body (sync): {resp.text}", flush=True)
+                print(f">>> WhatsApp API Error: {resp.text}", flush=True)
+        except Exception as e:
+            print(f">>> WhatsApp API Network Error: {e}", flush=True)
 
 
 async def _send_message(to: str, text: str) -> None:
-    # Keep async version for any potential async callers
-    url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WA_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        for chunk in _chunk(_strip_markdown(text)):
-            print(f">>> Sending WhatsApp chunk to {to} (async): {chunk[:20]}...", flush=True)
-            resp = await client.post(url, headers=headers, json={
-                "messaging_product": "whatsapp",
-                "recipient_type": "individual",
-                "to": to,
-                "type": "text",
-                "text": {"body": chunk, "preview_url": False},
-            })
-            print(f">>> WhatsApp API Status (async): {resp.status_code}", flush=True)
-            if resp.status_code >= 400:
-                print(f">>> WhatsApp API Error Body (async): {resp.text}", flush=True)
+    # Just a wrapper for the sync version to keep compatibility if needed elsewhere
+    _send_message_sync(to, text)
 
 
-def _run_agent(sender: str, session_id: str, text: str) -> None:
-    """Synchronous wrapper to run in a dedicated thread."""
+def process_and_reply(sender: str, text: str) -> None:
+    """Official background task pattern: runs AFTER 200 OK is sent to Meta."""
+    session_id = f"wa_{sender}"
     try:
-        print(f">>> Thread started for {sender}. Sending 'Ping'...", flush=True)
-        _send_message_sync(sender, "🔄 Agent is thinking... please wait.")
-        print(">>> 'Ping' sent. Calling process_user_message...", flush=True)
+        print(f">>> Background task started for {sender}", flush=True)
+        # 1. Save user message first
+        save_message(session_id, "user", text)
         
+        # 2. Call agent
         result = process_user_message(
             prompt=text,
             session_id=session_id,
             use_search=True,
             provider_override="Auto (Default)",
         )
-        answer = result["answer"]
+        answer = result.get("answer", "Sorry, I couldn't process that.")
         print(f">>> Agent result ready for {sender}", flush=True)
+        
+        # 3. Save assistant reply
         save_message(session_id, "assistant", answer)
-        print(">>> Assistant message saved. Sending reply...", flush=True)
+        
+        # 4. Send reply back
         _send_message_sync(sender, answer)
-        print(">>> WhatsApp reply sent successfully.", flush=True)
+        print(f">>> Background task SUCCESS for {sender}", flush=True)
+        
     except Exception as e:
-        print(f">>> THREAD ERROR for {sender}: {e}", flush=True)
-        logger.exception(f"Agent error in background thread for {sender}: {e}")
+        print(f">>> Background task FAILED for {sender}: {e}", flush=True)
+        import traceback
+        print(traceback.format_exc(), flush=True)
         try:
-            _send_message_sync(sender, "❌ Sorry, something went wrong during processing.")
+            _send_message_sync(sender, "❌ Sorry, I encountered an error processing your message.")
         except:
             pass
 
@@ -162,20 +156,14 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
         _seen_ids.add(msg_id)
         sender = msg["from"]
         text = msg.get("text", {}).get("body", "")
-        print(f">>> Processing msg from {sender}: {text[:20]}", flush=True)
+        print(f">>> WA incoming from {sender}: {text[:50]}", flush=True)
         
-        session_id = f"wa_{sender}"
-        save_message(session_id, "user", text)
-        print(">>> User message saved to DB", flush=True)
-        
-        print(">>> Launching background thread...", flush=True)
-        thread = threading.Thread(target=_run_agent, args=(sender, session_id, text), daemon=True)
-        thread.start()
-        print(">>> Background thread launched. Returning 200.", flush=True)
+        # FastAPI BackgroundTask: returns 200 immediately, runs function after
+        background_tasks.add_task(process_and_reply, sender, text)
+        print(">>> Task queued. Returning 200 to Meta.", flush=True)
         
     except Exception as e:
-        print(f">>> CRITICAL PARSE ERROR: {e}", flush=True)
-        logger.exception(f"Error parsing WhatsApp payload: {e}")
+        print(f">>> Webhook error: {e}", flush=True)
 
     return Response(status_code=200)
 
