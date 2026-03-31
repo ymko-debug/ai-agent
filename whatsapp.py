@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, hashlib, hmac, logging, os, re, json
+import asyncio, hashlib, hmac, logging, os, re, json, threading
 from typing import Set
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
@@ -46,7 +46,29 @@ def _chunk(text: str, size: int = 4096) -> list[str]:
     return chunks or [text[:size]]
 
 
+def _send_message_sync(to: str, text: str) -> None:
+    url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WA_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    with httpx.Client(timeout=15) as client:
+        for chunk in _chunk(_strip_markdown(text)):
+            logger.info(f"Sending WhatsApp chunk to {to} (sync): {chunk[:50]}...")
+            resp = client.post(url, headers=headers, json={
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "text",
+                "text": {"body": chunk, "preview_url": False},
+            })
+            logger.info(f"WhatsApp API Status (sync): {resp.status_code}")
+            if resp.status_code >= 400:
+                logger.error(f"WhatsApp API Error Body (sync): {resp.text}")
+
+
 async def _send_message(to: str, text: str) -> None:
+    # Keep async version for any potential async callers
     url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WA_TOKEN}",
@@ -54,7 +76,7 @@ async def _send_message(to: str, text: str) -> None:
     }
     async with httpx.AsyncClient(timeout=15) as client:
         for chunk in _chunk(_strip_markdown(text)):
-            logger.info(f"Sending WhatsApp chunk to {to}: {chunk[:50]}...")
+            logger.info(f"Sending WhatsApp chunk to {to} (async): {chunk[:50]}...")
             resp = await client.post(url, headers=headers, json={
                 "messaging_product": "whatsapp",
                 "recipient_type": "individual",
@@ -62,30 +84,33 @@ async def _send_message(to: str, text: str) -> None:
                 "type": "text",
                 "text": {"body": chunk, "preview_url": False},
             })
-            logger.info(f"WhatsApp API Status: {resp.status_code}")
+            logger.info(f"WhatsApp API Status (async): {resp.status_code}")
             if resp.status_code >= 400:
-                logger.error(f"WhatsApp API Error Body: {resp.text}")
+                logger.error(f"WhatsApp API Error Body (async): {resp.text}")
 
 
-async def _run_agent(sender: str, session_id: str, text: str) -> None:
+def _run_agent(sender: str, session_id: str, text: str) -> None:
+    """Synchronous wrapper to run in a dedicated thread."""
     try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: process_user_message(
-                prompt=text,
-                session_id=session_id,
-                use_search=True,
-                provider_override="Auto (Default)",
-            ),
+        logger.info(f"Background thread started for session {session_id}")
+        result = process_user_message(
+            prompt=text,
+            session_id=session_id,
+            use_search=True,
+            provider_override="Auto (Default)",
         )
         answer = result["answer"]
         logger.info(f"Agent finished processing for {sender}. Saving and sending reply.")
-        await loop.run_in_executor(None, save_message, session_id, "assistant", answer)
-        await _send_message(sender, answer)
+        save_message(session_id, "assistant", answer)
+        
+        # Call the async sender using a dedicated event loop or just httpx sync
+        _send_message_sync(sender, answer)
     except Exception as e:
-        logger.exception("Agent error during WhatsApp process: %s", e)
-        await _send_message(sender, "Sorry, something went wrong. Please try again.")
+        logger.exception(f"Agent error in background thread for {sender}: {e}")
+        try:
+            _send_message_sync(sender, "Sorry, something went wrong. Please try again.")
+        except:
+            pass
 
 
 @router.get("/whatsapp")
@@ -143,11 +168,12 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
         logger.info(f"Processing message from {sender}: {text[:50]}...")
         
         session_id = f"wa_{sender}"
-        await asyncio.get_event_loop().run_in_executor(
-            None, save_message, session_id, "user", text
-        )
-        logger.info(f"Queuing background task _run_agent for {session_id}")
-        background_tasks.add_task(_run_agent, sender, session_id, text)
+        # Save user message synchronously before spawning thread
+        save_message(session_id, "user", text)
+        
+        logger.info(f"Spawning native thread for session {session_id}")
+        thread = threading.Thread(target=_run_agent, args=(sender, session_id, text), daemon=True)
+        thread.start()
         
     except Exception as e:
         logger.exception(f"Error parsing WhatsApp payload: {e}")
