@@ -1,4 +1,5 @@
 
+import re
 import requests
 from .config import TAVILY_API_KEY
 
@@ -46,6 +47,78 @@ def needs_search(prompt: str) -> bool:
     return len(text.split()) > 8
 
 
+# ─────────────────────────────────────────
+# BROWSER INTENT DETECTION
+# ─────────────────────────────────────────
+
+def detect_browser_intent(prompt: str) -> dict:
+    """
+    Detect if the user wants a browser action.
+    Returns a dict with at minimum {"action": <str or None>}.
+    """
+    text = prompt.strip().lower()
+
+    # ── register / sign up / login (Skill-First Override) ──────────────────────
+    # We check these first so they aren't hijacked by generic URL navigation.
+    form_signals = [r'\bregister\b', r'\bsign\s*up\b', r'\bcreate\s+account\b', r'\bjoin\b', r'\blogin\b', r'\bsign\s*in\b']
+    if any(re.search(s, text) for s in form_signals):
+        return {"action": None} # Forces LLM-based planning/skill-building
+
+    # ── navigate / open / go to ────────────────────────────────────────────────
+    nav_match = re.search(
+        r'(?:open|go to|navigate to|visit|browse to|load|show me)?\s*'
+        r'(https?://[^\s]+|[a-z0-9\-]+\.(?:com|org|net|io|gov|edu|co|ai|app|dev)[^\s]*)',
+        text,
+    )
+    if nav_match or re.search(r'\b(open|go to|navigate to|visit)\b', text):
+        # Extract URL-like token
+        url_match = re.search(
+            r'(https?://[^\s]+|[a-z0-9\-]+\.(?:com|org|net|io|gov|edu|co|ai|app|dev)[^\s]*)',
+            text,
+        )
+        if url_match:
+            return {"action": "navigate", "url": url_match.group(1)}
+
+    # ── google search / search for ─────────────────────────────────────────────
+    google_match = re.search(
+        r'(?:search(?:\s+for)?|google(?:\s+for)?)\s+(.+)',
+        text,
+    )
+    if google_match:
+        query = google_match.group(1).strip().rstrip('.')
+        return {"action": "search", "query": query}
+
+    # ── click ──────────────────────────────────────────────────────────────────
+    click_match = re.search(r'\bclick(?:\s+on)?\s+["\']?(.+?)["\']?$', text)
+    if click_match:
+        return {"action": "click", "target": click_match.group(1).strip()}
+
+    # ── type into field ────────────────────────────────────────────────────────
+    type_match = re.search(
+        r'type\s+["\']?(.+?)["\']?\s+(?:in(?:to)?|on)\s+(.+)',
+        text,
+    )
+    if type_match:
+        return {
+            "action": "type",
+            "text": type_match.group(1).strip(),
+            "target": type_match.group(2).strip(),
+            "press_enter": bool(re.search(r'\b(and\s+)?(?:press|hit|submit)\b', text)),
+        }
+
+    # ── register / sign up / login (already handled above) ─────────────────────
+
+    # ── read / what's on the page ──────────────────────────────────────────────
+    if re.search(r"\b(read|what'?s? on|show|describe)\s+(the\s+)?page\b", text):
+        return {"action": "read"}
+
+    # ── close browser ──────────────────────────────────────────────────────────
+    if re.search(r'\bclose\s+(the\s+)?browser\b', text):
+        return {"action": "close"}
+
+    return {"action": None}
+
+
 def search_web(query: str, max_results: int = 4) -> str | None:
     if not TAVILY_API_KEY:
         return None
@@ -76,8 +149,16 @@ def search_web(query: str, max_results: int = 4) -> str | None:
             if attempt == 0:
                 time.sleep(1.5)
                 continue
+            import logging; logging.getLogger("search").warning("Tavily timeout for query: %s", query)
+            return "[Search timed out — answering from memory]"
+        except requests.exceptions.ConnectionError:
+            import logging; logging.getLogger("search").warning("Tavily unreachable (connection error)")
+            return "[Search unavailable — answering from memory]"
+        except requests.exceptions.HTTPError as e:
+            import logging; logging.getLogger("search").warning("Tavily HTTP error %s for query: %s", e, query)
             return None
-        except Exception:
+        except Exception as e:
+            import logging; logging.getLogger("search").warning("Tavily unexpected error: %s", e)
             if attempt == 0:
                 time.sleep(1.5)
                 continue

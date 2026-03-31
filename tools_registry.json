@@ -1,0 +1,29 @@
+{
+    "registered_skills": [
+        {
+            "name": "get_weather",
+            "filepath": "skills\\tools_get_weather.py",
+            "description": "Retrieve current weather."
+        },
+        {
+            "name": "get_current_time",
+            "filepath": "skills\\tools_get_current_time.py",
+            "description": "Get system time."
+        },
+        {
+            "name": "pdf_ocr_nvidia",
+            "filepath": "skills\\tools_pdf_ocr_nvidia.py",
+            "description": "Perform OCR on PDF via NVIDIA API."
+        },
+        {
+            "name": "register_on_website",
+            "filepath": "skills\\tools_register_on_website.py",
+            "description": "Universal website registration skill. Uses Accessibility Tree for field discovery."
+        },
+        {
+            "name": "register_on_saatchiart",
+            "filepath": "skills\\tools_register_on_saatchiart.py",
+            "description": "*   **Tool Name:** `register_on_saatchiart`\n*   **Description:** Registers a new user on Saatchi Art.\n*   **Inputs:**\n    *   `email` (string): The email address for the new account.\n    *   `password..."
+        }
+    ]
+}

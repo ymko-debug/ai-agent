@@ -1,0 +1,433 @@
+/* static/style.css — dark theme agent UI */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #1a1a2e;
+  --sidebar-bg:  #16213e;
+  --user-bubble: #0f3460;
+  --asst-bubble: #1a1a2e;
+  --accent:      #e94560;
+  --border:      rgba(233,69,96,0.25);
+  --text:        #e0e0e0;
+  --text-muted:  #8892a4;
+  --input-bg:    #0d1b2a;
+  --radius:      10px;
+  --sidebar-w:   260px;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Layout ─────────────────────────────────────────────────────────────────── */
+
+.layout {
+  display: flex;
+  height: 100vh;
+}
+
+/* ── Sidebar ────────────────────────────────────────────────────────────────── */
+
+.sidebar {
+  width: var(--sidebar-w);
+  background: var(--sidebar-bg);
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  padding: 18px 16px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sidebar-section {
+  padding: 12px 12px 4px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.key-status { display: flex; flex-direction: column; gap: 2px; }
+.calls-count { margin-top: 4px; }
+
+/* ── Buttons ────────────────────────────────────────────────────────────────── */
+
+.btn-primary, .btn-secondary {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: opacity 0.15s;
+}
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-secondary {
+  background: rgba(255,255,255,0.07);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.btn-primary:hover, .btn-secondary:hover { opacity: 0.85; }
+.full-width { width: 100%; }
+
+.btn-icon {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color 0.15s;
+}
+.btn-icon:hover { color: var(--accent); }
+
+.btn-stop {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-stop:hover { opacity: 0.85; }
+
+/* ── Toggle ─────────────────────────────────────────────────────────────────── */
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.toggle-row input[type="checkbox"] { display: none; }
+.toggle-slider {
+  width: 32px; height: 18px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 9px;
+  position: relative;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+.toggle-slider::after {
+  content: '';
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 14px; height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.toggle-row input:checked + .toggle-slider { background: var(--accent); }
+.toggle-row input:checked + .toggle-slider::after { transform: translateX(14px); }
+
+/* ── Select ─────────────────────────────────────────────────────────────────── */
+
+.field-row { display: flex; flex-direction: column; gap: 4px; }
+.field-row label { font-size: 11px; color: var(--text-muted); }
+.select-input {
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  width: 100%;
+}
+
+/* ── Session list ───────────────────────────────────────────────────────────── */
+
+#session-list { display: flex; flex-direction: column; gap: 2px; }
+
+.session-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+  gap: 6px;
+}
+.session-item:hover { background: rgba(255,255,255,0.06); }
+.session-item.active { background: rgba(233,69,96,0.15); }
+
+.session-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+/* ── Chat area ──────────────────────────────────────────────────────────────── */
+
+.chat-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100vh;
+}
+
+.chat-header {
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.chat-header span { font-size: 18px; font-weight: 600; }
+.provider-badge { font-size: 12px; color: var(--text-muted); }
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ── Message bubbles ────────────────────────────────────────────────────────── */
+
+.message { display: flex; flex-direction: column; max-width: 80%; }
+.message.user { align-self: flex-end; align-items: flex-end; }
+.message.assistant { align-self: flex-start; align-items: flex-start; }
+
+.bubble {
+  padding: 10px 14px;
+  border-radius: 14px;
+  line-height: 1.55;
+  font-size: 14px;
+  word-break: break-word;
+}
+.message.user .bubble {
+  background: var(--user-bubble);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.message.assistant .bubble {
+  background: var(--asst-bubble);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-bottom-left-radius: 4px;
+}
+
+.provider-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  padding: 0 4px;
+}
+
+.bubble a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.bubble a:hover {
+  text-decoration: underline;
+}
+
+/* ── Spinner ────────────────────────────────────────────────────────────────── */
+
+.spinner-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+}
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid rgba(233,69,96,0.3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner-text { color: var(--text-muted); font-size: 13px; }
+
+/* ── Stop row ───────────────────────────────────────────────────────────────── */
+
+.stop-row {
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+  flex-shrink: 0;
+}
+
+/* ── File badge ─────────────────────────────────────────────────────────────── */
+
+.file-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: rgba(233,69,96,0.1);
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+/* ── Input bar ──────────────────────────────────────────────────────────────── */
+
+.input-bar {
+  padding: 12px 20px 16px;
+  background: var(--bg);
+  flex-shrink: 0;
+}
+
+/* The outer rounded container — Perplexity-style pill */
+#chat-form {
+  display: flex;
+  flex-direction: column;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 10px 12px 10px 16px;
+  gap: 8px;
+  transition: border-color 0.15s;
+}
+#chat-form:focus-within {
+  border-color: var(--accent);
+}
+
+/* The textarea itself — no border, just text */
+#msg-input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 15px;
+  font-family: inherit;
+  line-height: 1.6;
+  resize: none;
+  overflow-y: hidden;
+  min-height: 26px;
+  max-height: 200px;
+  overflow-wrap: break-word;   /* ← THIS is what stops horizontal scroll */
+  word-break: break-word;      /* ← breaks very long unspaced strings too */
+  white-space: pre-wrap;       /* ← respects Shift+Enter newlines */
+}
+#msg-input::placeholder { color: var(--text-muted); }
+
+/* Bottom row: attach on left, send on right */
+.input-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.attach-wrap { position: relative; flex-shrink: 0; }
+
+.upload-popup {
+  position: absolute;
+  bottom: 48px; left: 0;
+  background: #1e2d45;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.upload-popup-title { font-weight: 600; font-size: 13px; }
+.upload-popup input[type="file"] { display: none; }
+.upload-label {
+  display: block;
+  text-align: center;
+  cursor: pointer;
+  padding: 8px;
+}
+.btn-attach {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: color 0.15s, background 0.15s;
+}
+.btn-attach:hover { background: rgba(255,255,255,0.07); color: var(--text); }
+
+.btn-send {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: opacity 0.15s;
+}
+.btn-send:hover { opacity: 0.85; }
+.btn-send:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ── Utility ────────────────────────────────────────────────────────────────── */
+
+.hidden { display: none !important; }
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+/* ── Mobile ─────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .sidebar { display: none; }
+  .message { max-width: 95%; }
+}

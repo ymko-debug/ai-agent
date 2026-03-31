@@ -1,17 +1,17 @@
 
 from typing import Optional
-from pydantic import BaseModel, HttpUrl, EmailStr
+from pydantic import BaseModel
 
 
 class Lead(BaseModel):
     name: str
     title: str
     company: str
-    website: Optional[HttpUrl] = None
+    website: Optional[str] = None
     phone: Optional[str] = None
-    email: Optional[EmailStr] = None
-    linkedin: Optional[HttpUrl] = None
-    source_url: Optional[HttpUrl] = None
+    email: Optional[str] = None
+    linkedin: Optional[str] = None
+    source_url: Optional[str] = None
 
 
 class EmailOutreach(BaseModel):

@@ -1,0 +1,17 @@
+The code failed the test harness:
+
+Traceback (most recent call last):
+  File "C:\Users\rusla\OneDrive\Documents\Agent\core\meta.py", line 91, in test_skill
+    spec.loader.exec_module(module)   # Phase 1: import
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1022, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1160, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1090, in source_to_code
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "C:\Users\rusla\OneDrive\Documents\Agent\skills\tools_register_foundmyself.py", line 158
+    </toolcall>
+    ^
+SyntaxError: invalid syntax
+
+
+Please fix the bug and return the complete corrected file.

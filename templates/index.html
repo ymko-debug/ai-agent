@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Assistant</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<script src="https://unpkg.com/htmx-ext-ws@2.0.2/ws.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- ── SIDEBAR ─────────────────────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span class="logo">🤖 AI Assistant</span>
+    </div>
+
+    <div class="sidebar-section">
+      <button class="btn-primary full-width" onclick="newChat()">➕ New chat</button>
+      <button class="btn-secondary full-width" onclick="closeBrowser()">🌐 Close browser</button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="section-label">⚙️ Settings</div>
+
+      <label class="toggle-row">
+        <span>Web search</span>
+        <input type="checkbox" id="use-search" checked>
+        <span class="toggle-slider"></span>
+      </label>
+
+      <div class="field-row">
+        <label for="provider-select">Provider</label>
+        <select id="provider-select" class="select-input">
+          <option value="Auto (Default)">Auto (Default)</option>
+          <option value="Claude">Claude</option>
+          <option value="OpenRouter">OpenRouter</option>
+          <option value="NVIDIA">NVIDIA</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="section-label">💬 Chats</div>
+      <div id="session-list">
+        {% for sid in sessions %}
+        <div class="session-item {% if loop.first %}active{% endif %}" id="session-{{ sid }}"
+             onclick="loadSession('{{ sid }}')">
+          <span class="session-label">{{ session_names.get(sid, sid.replace('session_','')) }}</span>
+          <button class="btn-icon"
+                  hx-delete="/sessions/{{ sid }}"
+                  hx-confirm="Delete this chat?"
+                  hx-target="#session-{{ sid }}"
+                  hx-swap="outerHTML"
+                  onclick="event.stopPropagation()"
+                  title="Delete">🗑</button>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="key-status">
+        <span>Claude: {{ '✅' if claude_ok else '❌' }}</span>
+        <span>OpenRouter: {{ '✅' if openrouter_ok else '⚠️' }}</span>
+        <span>Tavily: {{ '✅' if tavily_ok else '⚠️' }}</span>
+      </div>
+      <div class="calls-count">Calls today: <strong id="calls-count">{{ calls_today }}</strong> / {{ daily_limit }}</div>
+    </div>
+  </aside>
+
+  <!-- ── MAIN CHAT AREA ───────────────────────────────────────────────────── -->
+  <main class="chat-area">
+
+    <div class="chat-header">
+      <span id="chat-title">Ask me anything</span>
+      <span class="provider-badge" id="provider-badge"></span>
+    </div>
+
+    <!-- Message history -->
+    <div class="messages" id="messages">
+      <!-- Populated by loadSession() on page load -->
+      <!-- WebSocket live update target (inside scroll area) -->
+      <div id="ws-container"></div>
+    </div>
+
+    <!-- Stop button — shown while working -->
+    <div id="stop-row" class="stop-row hidden">
+      <button class="btn-stop" id="stop-btn">⏹ Stop</button>
+    </div>
+
+    <div class="input-bar">
+      <!-- file badge stays here, above the form -->
+      <div id="file-badge" class="file-badge hidden">
+        <span id="file-badge-name"></span>
+        <button type="button" class="btn-icon" onclick="clearFile()">✕</button>
+      </div>
+
+      <form id="chat-form" onsubmit="sendMessage(event)">
+        <!-- textarea — full width row -->
+        <textarea
+          id="msg-input"
+          name="prompt"
+          rows="1"
+          placeholder="Message…"
+          autocomplete="off"
+        ></textarea>
+
+        <!-- bottom action row -->
+        <div class="input-actions">
+          <!-- left: attach button -->
+          <div class="attach-wrap">
+            <button type="button" class="btn-attach" onclick="toggleUpload()">+</button>
+            <div id="upload-popup" class="upload-popup hidden">
+              <div class="upload-popup-title">Attach file</div>
+              <label class="upload-label btn-secondary">
+                📎 Choose file
+                <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.webp,.tiff,.txt" onchange="handleFileSelect(this)">
+              </label>
+            </div>
+          </div>
+
+          <!-- right: send button -->
+          <button type="submit" id="send-btn" class="btn-send">↑</button>
+        </div>
+      </form>
+
+      <!-- Hidden state fields moved inside input-bar for closure -->
+      <input type="hidden" id="current-session" value="{{ new_sid }}">
+      <input type="hidden" id="pending-file-path" value="">
+      <input type="hidden" id="pending-file-name" value="">
+    </div>
+
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+  // Initialize: load first session if any exist
+  (function() {
+    {% if sessions %}
+    loadSession('{{ sessions[0] }}');
+    {% endif %}
+  })();
+</script>
+</body>
+</html>
