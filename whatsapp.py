@@ -1,5 +1,5 @@
-from __future__ import annotations
-import asyncio, hashlib, hmac, logging, os, re, json, threading
+import asyncio, hashlib, hmac, logging, os, re, json, threading, sys
+
 from typing import Set
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
@@ -92,7 +92,10 @@ async def _send_message(to: str, text: str) -> None:
 def _run_agent(sender: str, session_id: str, text: str) -> None:
     """Synchronous wrapper to run in a dedicated thread."""
     try:
-        logger.info(f"Background thread started for session {session_id}")
+        print(f">>> Thread started for {sender}. Sending 'Ping'...", flush=True)
+        _send_message_sync(sender, "🔄 Agent is thinking... please wait.")
+        print(">>> 'Ping' sent. Calling process_user_message...", flush=True)
+        
         result = process_user_message(
             prompt=text,
             session_id=session_id,
@@ -100,15 +103,16 @@ def _run_agent(sender: str, session_id: str, text: str) -> None:
             provider_override="Auto (Default)",
         )
         answer = result["answer"]
-        logger.info(f"Agent finished processing for {sender}. Saving and sending reply.")
+        print(f">>> Agent result ready for {sender}", flush=True)
         save_message(session_id, "assistant", answer)
-        
-        # Call the async sender using a dedicated event loop or just httpx sync
+        print(">>> Assistant message saved. Sending reply...", flush=True)
         _send_message_sync(sender, answer)
+        print(">>> WhatsApp reply sent successfully.", flush=True)
     except Exception as e:
+        print(f">>> THREAD ERROR for {sender}: {e}", flush=True)
         logger.exception(f"Agent error in background thread for {sender}: {e}")
         try:
-            _send_message_sync(sender, "Sorry, something went wrong. Please try again.")
+            _send_message_sync(sender, "❌ Sorry, something went wrong during processing.")
         except:
             pass
 
@@ -130,52 +134,47 @@ def verify_webhook(
 
 @router.post("/whatsapp")
 async def receive_message(request: Request, background_tasks: BackgroundTasks):
-    logger.info("WhatsApp webhook hit (POST)")
+    print(">>> WhatsApp webhook POST received", flush=True)
     if not all([WA_TOKEN, WA_PHONE_ID, WA_APP_SECRET, WA_VERIFY_TOKEN]):
-        logger.warning("WhatsApp integration missing credentials in receive_message")
+        print(">>> ERROR: Missing WhatsApp credentials", flush=True)
         raise HTTPException(status_code=503, detail="WhatsApp integration not configured.")
 
     body = await request.body()
     sig = request.headers.get("X-Hub-Signature-256", "")
     if not _verify_signature(body, sig):
-        logger.warning("WhatsApp signature verification failed")
+        print(">>> ERROR: Signature verification failed", flush=True)
         raise HTTPException(status_code=403)
 
     payload = await request.json()
-    logger.info(f"WhatsApp payload received: {json.dumps(payload)[:500]}")
+    print(f">>> Payload keys: {list(payload.keys())}", flush=True)
     try:
         changes = payload["entry"][0]["changes"][0]["value"]
         if "messages" not in changes:
-            logger.info("No messages in WhatsApp payload changes")
+            print(">>> No messages in payload", flush=True)
             return Response(status_code=200)
         
         msg = changes["messages"][0]
         msg_id = msg.get("id", "")
         if msg_id in _seen_ids:
-            logger.info(f"Already processed message {msg_id}, skipping")
+            print(f">>> Duplicate message {msg_id} skipped", flush=True)
             return Response(status_code=200)
         
         _seen_ids.add(msg_id)
-        if len(_seen_ids) > 10_000:
-            _seen_ids.clear()
-            
-        if msg.get("type") != "text":
-            logger.info(f"Skipping non-text message type: {msg.get('type')}")
-            return Response(status_code=200)
-            
         sender = msg["from"]
         text = msg.get("text", {}).get("body", "")
-        logger.info(f"Processing message from {sender}: {text[:50]}...")
+        print(f">>> Processing msg from {sender}: {text[:20]}", flush=True)
         
         session_id = f"wa_{sender}"
-        # Save user message synchronously before spawning thread
         save_message(session_id, "user", text)
+        print(">>> User message saved to DB", flush=True)
         
-        logger.info(f"Spawning native thread for session {session_id}")
+        print(">>> Launching background thread...", flush=True)
         thread = threading.Thread(target=_run_agent, args=(sender, session_id, text), daemon=True)
         thread.start()
+        print(">>> Background thread launched. Returning 200.", flush=True)
         
     except Exception as e:
+        print(f">>> CRITICAL PARSE ERROR: {e}", flush=True)
         logger.exception(f"Error parsing WhatsApp payload: {e}")
 
     return Response(status_code=200)
