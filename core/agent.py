@@ -268,11 +268,12 @@ def build_actions_list() -> str:
 # System prompt assembly
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(session_id: str) -> str:
-    # Read user + agent facts into user_memory slot
-    user_mem = format_memory_by_namespace(["user", "agent"])
+def build_system_prompt(session_id: str, current_query: str = "") -> str:
+    from core.memory import format_core_memory_for_prompt, format_memory_by_namespace
+    # Selective retrieval: only top facts relevant to the current query
+    user_mem = format_core_memory_for_prompt(current_query)
     
-    # Read ONLY task facts into task_memory slot
+    # Read ONLY task facts into task_memory slot (keep full for now as they are short-lived)
     task_mem = format_memory_by_namespace(["task"])
     
     # NOTE: "research" is explicitly excluded from the system prompt!
@@ -385,8 +386,7 @@ def dispatch_tool(tool_name: str, tool_input: dict, session_id: str) -> Any:
             target_url=tool_input.get("url") or tool_input.get("target_url")
         )}
 
-    if tool_name == "updatecorememory":
-        from core.db import update_core_memory, NS_USER
+        from core.db import upsert_memory_with_embedding, NS_USER
         ns        = tool_input.get("namespace", NS_USER)
         key       = tool_input.get("key", "").strip()
         value     = tool_input.get("value", "").strip()
@@ -397,7 +397,7 @@ def dispatch_tool(tool_name: str, tool_input: dict, session_id: str) -> Any:
         if not key or not value:
             return {"error": "key and value are required"}
 
-        success = update_core_memory(
+        success = upsert_memory_with_embedding(
             namespace=ns, key=key, value=value,
             source=source, confidence=confidence,
             session_id=session_id,
@@ -701,7 +701,7 @@ def safe_extract_core_facts(prompt: str, answer: str, session_id: str,
                     expires_days = 7  # auto-extracted facts expire in 7 days
 
                 if key and val:
-                    success = update_core_memory(
+                    success = upsert_memory_with_embedding(
                         namespace=ns, key=key, value=val,
                         source=source, confidence=conf,
                         session_id=session_id,
@@ -968,7 +968,7 @@ def process_user_message(
     intent = detect_browser_intent(prompt)
 
     # Build system prompt + actions list (fast, needed by planner)
-    system_prompt = build_system_prompt(session_id)
+    system_prompt = build_system_prompt(session_id, current_query=prompt)
     actions_list  = build_actions_list()
 
     # ── Thread-safe worker functions ──────────────────────────────────────

@@ -7,9 +7,11 @@
 import os
 import psycopg2
 from psycopg2 import pool
+import psycopg2.extras
 from datetime import datetime, timedelta
 import logging
 from typing import Optional
+from openai import OpenAI  # already in requirements.txt
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,9 @@ class DbConn:
 def init_db():
     with DbConn() as conn:
         with conn.cursor() as cur:
+            # Enable vector extension
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            
             # 1. corememory
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS corememory (
@@ -72,6 +77,7 @@ def init_db():
                     session_id     TEXT,
                     expires_at     TEXT,
                     updated_at     TEXT NOT NULL,
+                    embedding      vector(1536),
                     PRIMARY KEY (namespace, key)
                 )
             """)
@@ -136,6 +142,93 @@ def init_db():
                 )
             """)
     logger.info("PostgreSQL database initialized successfully")
+
+# ── Embeddings and Semantic Search ──────────────────────────────────────────
+
+def _embed(text: str) -> list[float]:
+    """Embed text using OpenAI text-embedding-3-small ($0.02/MTok — near-zero cost)."""
+    # Use OpenAI directly if key is available, else fallback to OpenRouter
+    api_key = os.environ.get("OPENAI_API_KEY")
+    client = None
+    
+    if api_key:
+        client = OpenAI(api_key=api_key)
+        model = "text-embedding-3-small"
+    else:
+        # Fallback to OpenRouter
+        or_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+        if or_key:
+            client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=or_key
+            )
+            model = "openai/text-embedding-3-small"
+        
+    if not client:
+        raise ValueError("No API key available for embeddings (OPENAI_API_KEY or OPENROUTER_API_KEY)")
+
+    resp = client.embeddings.create(
+        model=model,
+        input=text[:2000]  # cap to avoid token errors
+    )
+    return resp.data[0].embedding
+
+def search_memory_semantic(query: str, limit: int = 6, namespaces: list[str] = None) -> list[dict]:
+    """
+    Return top-k corememory rows most similar to query.
+    Falls back to full scan if no embeddings exist yet (cold start).
+    """
+    try:
+        vec = _embed(query)
+        vec_str = "[" + ",".join(str(x) for x in vec) + "]"
+        ns_filter = ""
+        params = [vec_str, limit]
+        if namespaces:
+            ns_filter = "AND namespace = ANY(%s)"
+            params = [vec_str, namespaces, limit]
+            
+        with DbConn() as conn:
+            # Use RealDictCursor to match the existing dict return pattern
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"""
+                    SELECT namespace, key, value, confidence, source, expires_at
+                    FROM corememory
+                    WHERE (expires_at IS NULL OR expires_at > NOW())
+                    {ns_filter}
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                """, params)
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logger.warning(f"Semantic search failed, falling back to full scan: {e}")
+        return get_core_memory(namespace=namespaces[0] if namespaces and len(namespaces) == 1 else None)
+
+def upsert_memory_with_embedding(namespace, key, value, source, confidence,
+                                  session_id=None, expires_days=None) -> bool:
+    """Write a memory fact AND its embedding in one call."""
+    # First do the normal write
+    success = update_core_memory(namespace, key, value, source, confidence,
+                                  session_id=session_id, expires_days=expires_days)
+    if not success:
+        return False
+        
+    # Then backfill embedding asynchronously
+    import threading
+    def _embed_and_store():
+        try:
+            vec = _embed(f"{namespace}:{key} = {value}")
+            vec_str = "[" + ",".join(str(x) for x in vec) + "]"
+            with DbConn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE corememory SET embedding = %s::vector
+                        WHERE namespace = %s AND key = %s
+                    """, (vec_str, namespace, key))
+        except Exception as e:
+            logger.warning(f"Embedding backfill failed for {namespace}:{key}: {e}")
+            
+    threading.Thread(target=_embed_and_store, daemon=True).start()
+    return True
 
 # ── Core Memory ──────────────────────────────────────────────────────────────
 

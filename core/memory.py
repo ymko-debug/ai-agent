@@ -61,6 +61,33 @@ def format_memory_by_namespace(namespaces: list[str], exclude_expired: bool = Tr
     return "\n".join(lines) if lines else ""
 
 
+def format_core_memory_for_prompt(current_query: str = "") -> str:
+    """
+    Semantic retrieval: return top-6 facts most relevant to current_query.
+    Falls back to full injection if query is empty (e.g. system startup).
+    """
+    from core.db import search_memory_semantic, get_core_memory
+
+    if current_query.strip():
+        facts = search_memory_semantic(
+            query=current_query,
+            limit=6,
+            namespaces=["user", "agent", "task"]   # never inject research: into prompt
+        )
+    else:
+        # Default fallback: recent user/agent facts
+        facts = [f for f in get_core_memory() if f["namespace"] in ("user", "agent")]
+
+    if not facts:
+        return ""
+
+    lines = []
+    for f in facts:
+        exp = f"  [expires {f['expires_at'][:10]}]" if f.get("expires_at") else ""
+        lines.append(f"  {f['namespace']}:{f['key']} = {f['value']}{exp}")
+    return "\n".join(lines)
+
+
 # ── Layer 2: Rolling Session Summary (Fold & Replace) ─────────────────────────
 
 def get_session_summary(session_id: str) -> str:
