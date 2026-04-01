@@ -1,34 +1,48 @@
 """
 scripts/backup_db.py
-Run before any schema migration or Phase 2 work.
-Creates a timestamped copy of the SQLite DB in backups/.
+Creates a backup count of PostgreSQL tables.
+Note: Full backups should be managed via Supabase/PostgreSQL provider.
 """
-import shutil
-import sqlite3
+import psycopg2
+import sys
+import os
 from pathlib import Path
 from datetime import datetime
 
-DB_PATH     = Path("assistant_memory.db")
-BACKUP_DIR  = Path("backups")
-BACKUP_DIR.mkdir(exist_ok=True)
+# Fix import path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
-backup_path = BACKUP_DIR / f"assistant_memory_{timestamp}.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    print("Error: DATABASE_URL is not set!")
+    sys.exit(1)
 
-# Verify DB is readable before copying
-# Use the table names exactly as defined in core/db.py
-conn = sqlite3.connect(DB_PATH)
-counts = {
-    "corememory":       conn.execute("SELECT COUNT(*) FROM corememory").fetchone()[0],
-    "conversations":    conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0],
-    "sessionsummaries": conn.execute("SELECT COUNT(*) FROM sessionsummaries").fetchone()[0],
-    "call_log":         conn.execute("SELECT COUNT(*) FROM call_log").fetchone()[0],
-    "search_cache":     conn.execute("SELECT COUNT(*) FROM search_cache").fetchone()[0],
-}
+conn = psycopg2.connect(DATABASE_URL)
+cur = conn.cursor()
+
+tables = [
+    "corememory",
+    "conversations",
+    "sessionsummaries",
+    "call_log",
+    "search_cache",
+    "active_tasks",
+    "session_names"
+]
+
+counts = {}
+for table in tables:
+    try:
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        counts[table] = cur.fetchone()[0]
+    except Exception as e:
+        counts[table] = f"Error: {e}"
+        conn.rollback()
+
+cur.close()
 conn.close()
 
-shutil.copy2(DB_PATH, backup_path)
-print(f"✓ Backup created: {backup_path}")
+print(f"✓ PostgreSQL Database Status ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}):")
 print(f"  Row counts:")
 for table, count in counts.items():
-    print(f"    {table:20s}: {count:,}")
+    print(f"    {table:20s}: {count}")
