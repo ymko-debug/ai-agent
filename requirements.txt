@@ -63,3 +63,4 @@ websockets
 python-multipart
 jinja2>=3.1.5
 httpx
+psycopg2-binary
