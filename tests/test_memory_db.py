@@ -6,11 +6,11 @@ from datetime import datetime, timedelta
 
 # Use a temp DB for tests — never touch the real one
 os.environ["DBPATH"] = tempfile.mktemp(suffix=".db")
-from core.db import init_db, update_core_memory, get_core_memory, purge_expired_memory
+from core.db import initdb, update_core_memory, get_core_memory, purge_expired_memory
 
 @pytest.fixture(autouse=True)
 def fresh_db():
-    init_db()
+    initdb()
     yield
     conn = sqlite3.connect(os.environ["DBPATH"])
     conn.execute("DELETE FROM corememory")

@@ -61,7 +61,7 @@ class DbConn:
                 self.conn.commit()
             _get_pool().putconn(self.conn)
 
-def init_db():
+def initdb():
     with DbConn() as conn:
         with conn.cursor() as cur:
             # Enable vector extension
@@ -292,7 +292,7 @@ def init_db():
             """)
             cur.execute("ALTER TABLE active_tasks ENABLE ROW LEVEL SECURITY")
 
-            # ── 8. llm_traces (Centralized in init_db) ─────────────────────────
+            # ── 8. llm_traces (Centralized in initdb) ─────────────────────────
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS llm_traces (
                     id         SERIAL    PRIMARY KEY,
@@ -722,9 +722,9 @@ def clear_active_task(session_id: str):
 
 def ensure_embedding_column() -> bool:
     """
-    Idempotent migration guard — runs AFTER init_db() in a fresh connection.
+    Idempotent migration guard — runs AFTER initdb() in a fresh connection.
     The vector extension must already be committed for vector(1536) to resolve.
-    Called from main.py startup, separate from init_db().
+    Called from main.py startup, separate from initdb().
     """
     try:
         with DbConn() as conn:

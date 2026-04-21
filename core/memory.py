@@ -13,7 +13,7 @@
 #   - update_core_memory()           → lives in db.py
 #   - get_core_memory()              → lives in db.py
 #   - purge_expired_memory()         → lives in db.py
-#   - init_db()                      → lives in db.py
+#   - initdb()                      → lives in db.py
 # ─────────────────────────────────────────────────────────────────
 
 import logging
