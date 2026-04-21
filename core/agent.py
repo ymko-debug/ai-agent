@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +25,7 @@ from core.config import (
     DAILY_CALL_LIMIT,
     HISTORY_LIMIT,
     MAX_HISTORY_CHARS,
+    SUMMARIZE_THRESHOLD,   # ← ADD THIS
     MAX_TOOL_ROUNDS,
     MAX_TOOL_ROUNDS_COMPLEX,
     MAX_TOOLS_PER_ROUND,
@@ -38,8 +41,7 @@ from core.db import (
 )
 from core.llm import route_llm
 from core.search import needs_search, search_web, detect_browser_intent
-from core.scraper import scrape_url_with_playwright
-from core.browser import run_browser_action
+from core.browser import run_browser_action, scrape_url_with_playwright
 from core.signals import evict_stop_flag
 from core.meta import run_meta_skill_loop
 from core.memory import (
@@ -51,7 +53,6 @@ from core.memory import (
 from leadgen.tools import extract_leads_from_text, save_leads_to_spreadsheet
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 # MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS_COMPLEX, MAX_TOOLS_PER_ROUND
 # imported from core.config
@@ -202,7 +203,8 @@ def _is_complex_task(prompt: str) -> bool:
     return any(s in prompt.strip().lower() for s in _COMPLEX_SIGNALS)
 
 
-def _run_planner(prompt: str, actions_list: str) -> str:
+def _run_fast_planner(prompt: str, actions_list: str) -> str:
+    """Standard Flash-Lite planner for short/new sessions."""
     try:
         plan, _ = route_llm(
             [{"role": "user", "content": (
@@ -212,9 +214,74 @@ def _run_planner(prompt: str, actions_list: str) -> str:
             )}],
             task_type="planner",
         )
+        # Discard conversational non-plans — these are the RC2 symptom outputs
+        _PLAN_POISON = ["i need more", "please tell me", "could you please", "what would you like", "clarify"]
+        if any(s in plan.lower() for s in _PLAN_POISON):
+            logger.warning("Planner returned conversational output (system prompt leak?): %s", plan[:80])
+            return ""   # treat as no plan rather than injecting bad instructions
         return plan
     except Exception:
         return ""
+
+
+def _run_deep_planner(prompt: str, actions_list: str, session_id: str, history: Optional[List[Dict]] = None) -> str:
+    """
+    Deep planner for high-context tasks.
+    Uses Nemotron 1M window — accounts for full session context.
+    """
+    from core.db import load_history, get_core_memory
+    from core.memory import get_session_summary
+
+    if history is None:
+        history = load_history(session_id, limit=50)
+    memory_facts  = get_core_memory()
+    prior_summary = get_session_summary(session_id)
+
+    # Build context — include prior summary so compressed history isn't lost
+    summary_block = f"PRIOR SUMMARY:\n{prior_summary}\n\n" if prior_summary else ""
+    history_text  = "\n".join(
+        f"{m['role'].upper()}: {m['content'][:300]}" for m in history
+    )
+    memory_text   = "\n".join(
+        f"{f['namespace']}:{f['key']} = {f['value']}" for f in memory_facts
+        if f['namespace'] in ('user', 'task')
+    )
+
+    try:
+        plan, _ = route_llm([{"role": "user", "content": (
+            f"{summary_block}"
+            f"MEMORY:\n{memory_text}\n\n"
+            f"RECENT CONVERSATION:\n{history_text}\n\n"
+            f"TASK: {prompt}\n\n"
+            f"AVAILABLE ACTIONS:\n{actions_list}\n\n"
+            f"Do NOT execute — only plan."
+        )}], task_type="deep_plan")
+        # Discard conversational non-plans — these are the RC2 symptom outputs
+        _PLAN_POISON = ["i need more", "please tell me", "could you please", "what would you like", "clarify"]
+        if any(s in plan.lower() for s in _PLAN_POISON):
+            logger.warning("Planner returned conversational output (system prompt leak?): %s", plan[:80])
+            return ""   # treat as no plan rather than injecting bad instructions
+        return plan
+    except Exception as e:
+        logger.warning("Deep planner failed, falling back to fast planner: %s", e)
+        return _run_fast_planner(prompt, actions_list)
+
+
+def _run_planner(prompt: str, actions_list: str, session_id: str = "") -> str:
+    """Routes to deep or fast planner based on available context volume."""
+    if session_id:
+        from core.db import load_history
+        from core.memory import estimate_tokens, get_session_summary
+        history       = load_history(session_id, limit=50)
+        prior_summary = get_session_summary(session_id)
+        # Token estimate of available context
+        context_tokens = estimate_tokens(history) + len(prior_summary) // 4
+        
+        # LOWER THRESHOLD (500) or COMPLEX TASK triggers the deep planner (Nemotron)
+        if _is_complex_task(prompt) or context_tokens > 500:
+            return _run_deep_planner(prompt, actions_list, session_id, history=history)
+
+    return _run_fast_planner(prompt, actions_list)
 
 
 # ---------------------------------------------------------------------------
@@ -268,10 +335,10 @@ def build_actions_list() -> str:
 # System prompt assembly
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(session_id: str, current_query: str = "") -> str:
+def build_system_prompt(session_id: str, current_query: str = "", memory_types: list[str] = None) -> str:
     from core.memory import format_core_memory_for_prompt, format_memory_by_namespace
     # Selective retrieval: only top facts relevant to the current query
-    user_mem = format_core_memory_for_prompt(current_query)
+    user_mem = format_core_memory_for_prompt(current_query, memory_types=memory_types)
     
     # Read ONLY task facts into task_memory slot (keep full for now as they are short-lived)
     task_mem = format_memory_by_namespace(["task"])
@@ -295,23 +362,64 @@ def build_system_prompt(session_id: str, current_query: str = "") -> str:
 # Skill execution
 # ---------------------------------------------------------------------------
 
-def _execute_skill(skill_name: str, input_data: dict) -> dict:
-    candidates = [SKILLS_DIR / f"{skill_name}.py", SKILLS_DIR / f"tools_{skill_name}.py"]
+def execute_skill(skill_name: str, input_data: dict) -> dict:
+    """
+    Run a skill in a CHILD PROCESS instead of the current process.
+    - Isolates all skill code from the agent process
+    - 30-second hard timeout kills runaway skills
+    - Skill crashes cannot corrupt agent state
+    - Output is JSON via stdout — clean interface
+    """
+    candidates = [
+        SKILLS_DIR / f"{skill_name}.py",
+        SKILLS_DIR / f"tools_{skill_name}.py",
+    ]
     skill_path = next((p for p in candidates if p.exists()), None)
+
     if not skill_path:
-        return {"error": f"Skill '{skill_name}' not found in {SKILLS_DIR}/"}
-    import importlib.util
-    spec   = importlib.util.spec_from_file_location(skill_name, skill_path)
-    module = importlib.util.module_from_spec(spec)
+        return {"error": f"Skill '{skill_name}' not found in {SKILLS_DIR}"}
+
+    # Each skill receives input_data via stdin as JSON
+    # Each skill must print its result as JSON to stdout
+    # Wrapper script handles the run() call cleanly
+    wrapper = f"""
+import sys, json
+sys.path.insert(0, '.')
+import importlib.util
+spec = importlib.util.spec_from_file_location("skill", r"{skill_path}")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+input_data = json.loads(sys.stdin.read())
+result = module.run(input_data)
+print(json.dumps(result if isinstance(result, dict) else {{"result": result}}))
+"""
     try:
-        spec.loader.exec_module(module)
+        proc = subprocess.run(
+            [sys.executable, "-c", wrapper],
+            input=json.dumps(input_data),
+            capture_output=True,
+            text=True,
+            timeout=30,                    # hard kill after 30s
+        )
+        if proc.returncode != 0:
+            logger.warning(f"Skill {skill_name} exited {proc.returncode}: {proc.stderr[:200]}")
+            return {"error": f"Skill exited with code {proc.returncode}", 
+                    "stderr": proc.stderr[:200]}
+        
+        stdout = proc.stdout.strip()
+        if not stdout:
+            return {"error": "Skill produced no output"}
+
+        return json.loads(stdout)
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Skill {skill_name} timed out after 30s")
+        return {"error": f"Skill '{skill_name}' timed out after 30 seconds"}
+    except json.JSONDecodeError as e:
+        logger.warning(f"Skill {skill_name} output was not valid JSON: {proc.stdout[:100]}")
+        return {"result": proc.stdout.strip()}   # return raw if not JSON
     except Exception as e:
-        return {"error": f"Skill load failed: {e}"}
-    if not hasattr(module, "run"):
-        return {"error": f"Skill '{skill_name}' has no run() function"}
-    try:
-        return {"result": module.run(input_data)}
-    except Exception as e:
+        logger.warning(f"Skill execution failed: {e}")
         return {"error": f"Skill execution failed: {e}"}
 
 
@@ -339,7 +447,7 @@ def dispatch_tool(tool_name: str, tool_input: dict, session_id: str) -> Any:
             "query":       tool_input.get("query", ""),
             "press_enter": tool_input.get("press_enter", False),
         }
-        result = run_browser_action(browser_intent)
+        result = run_browser_action(browser_intent, session_id=session_id)
         # CAPTCHA fallback
         if isinstance(result, str) and _is_captcha_or_blocked(result):
             logger.info("CAPTCHA detected on %s — falling back to web_search", url)
@@ -354,7 +462,7 @@ def dispatch_tool(tool_name: str, tool_input: dict, session_id: str) -> Any:
     # ── Scrape: CAPTCHA check ────────────────────────────────────────────────
     if tool_name == "scrape_url":
         url    = tool_input.get("url", "")
-        result = scrape_url_with_playwright(url)
+        result = scrape_url_with_playwright(url, session_id=session_id)
         if isinstance(result, str) and _is_captcha_or_blocked(result):
             logger.info("CAPTCHA on scrape_url %s — falling back to web_search", url)
             return {
@@ -367,7 +475,10 @@ def dispatch_tool(tool_name: str, tool_input: dict, session_id: str) -> Any:
         return _cached_search_web(tool_input.get("query", ""))
 
     if tool_name == "run_skill":
-        result = _execute_skill(tool_input.get("skill_name", ""), tool_input.get("input_data", {}))
+        skill_name = tool_input.get("skill_name", "")
+        input_data = tool_input.get("input_data", {})
+        # Pass session_id in input_data to isolate Playwright state in subprocess
+        result = execute_skill(skill_name, {**input_data, "session_id": session_id})
         # ── Structured Result Contract ────────────────────────────────────
         # Validate skill outcome instead of blindly trusting content checks
         inner = result.get("result", result) if isinstance(result, dict) else result
@@ -386,6 +497,7 @@ def dispatch_tool(tool_name: str, tool_input: dict, session_id: str) -> Any:
             target_url=tool_input.get("url") or tool_input.get("target_url")
         )}
 
+    if tool_name == "updatecorememory":
         from core.db import upsert_memory_with_embedding, NS_USER
         ns        = tool_input.get("namespace", NS_USER)
         key       = tool_input.get("key", "").strip()
@@ -466,6 +578,7 @@ def agentic_loop(
     conversation  = list(messages)
     provider_used = "Unknown"
     answer        = ""
+    tool_matches  = []
     # ── Per-Tool Attempt Cap (Circuit Breaker) ───────────────────────
     # Local variable — resets fresh for every agentic_loop invocation
     _breaker_counts: Dict[str, int] = {}
@@ -481,7 +594,15 @@ def agentic_loop(
                 provider_used,
             )
 
-        full_messages = [{"role": "system", "content": system_prompt}] + conversation
+        # Context-aware memory hints (RC14/RC16)
+        # Round 0 = Tool planning/Procedure focus
+        # Subsequent rounds = Result synthesis/Preference focus
+        # NEW: use signal-based detection for more precise hints
+        is_tool_planning = bool(tool_matches) or _is_complex_task(original_prompt)
+        m_types = ["procedure", "fact"] if is_tool_planning else ["preference", "fact"]
+        active_prompt = build_system_prompt(session_id, current_query=original_prompt, memory_types=m_types)
+
+        full_messages = [{"role": "system", "content": active_prompt}] + conversation
         override      = None if provider_override in (None, "Auto (Default)") else provider_override
         answer, provider_used = route_llm(
             full_messages, task_type="general", provider_override=override
@@ -667,7 +788,7 @@ def safe_extract_core_facts(prompt: str, answer: str, session_id: str,
     # ─────────────────────────────────────────────────────────────────────────
 
     try:
-        from core.db import update_core_memory, NS_USER
+        from core.db import upsert_memory_with_embedding, NS_USER
         raw = extract_core_facts(prompt, answer, route_llm)
         if not raw or not raw.strip():
             return
@@ -968,7 +1089,7 @@ def process_user_message(
     intent = detect_browser_intent(prompt)
 
     # Build system prompt + actions list (fast, needed by planner)
-    system_prompt = build_system_prompt(session_id, current_query=prompt)
+    system_prompt = build_system_prompt(session_id, current_query=prompt, memory_types=["procedure", "fact"])
     actions_list  = build_actions_list()
 
     # ── Thread-safe worker functions ──────────────────────────────────────
@@ -977,9 +1098,9 @@ def process_user_message(
         if is_stopped(session_id):
             return
         try:
-            maybe_summarize_session(session_id, route_llm)
+            maybe_summarize_session(session_id, route_llm, token_threshold=SUMMARIZE_THRESHOLD)
         except Exception as e:
-            logger.warning("Summarization worker failed: %s", e)
+            logger.error("Summarization worker failed: %s", e)
 
     def _worker_plan():
         """Optional explicit planner for complex tasks (LLM call, 2-5s)."""
@@ -987,7 +1108,7 @@ def process_user_message(
             return ""
         if _is_complex_task(prompt):
             logger.info("Complex task — running planner: %s", prompt[:80])
-            return _run_planner(prompt, actions_list)
+            return _run_planner(prompt, actions_list, session_id=session_id)
         return ""
 
     def _worker_search():
@@ -1003,7 +1124,7 @@ def process_user_message(
         if intent["action"]:
             browser_ran    = True
             search_ran     = True
-            browser_result = run_browser_action(intent)
+            browser_result = run_browser_action(intent, session_id=session_id)
             if _is_captcha_or_blocked(str(browser_result)):
                 browser_result = _cached_search_web(intent.get("url", prompt)) or browser_result
             context = (
@@ -1034,7 +1155,7 @@ def process_user_message(
                         ".gov", "sos.", "secretary", "corporations", "bizfile",
                         "sunbiz", "opencorporates", "companieshouse", "abr.business"
                     ]):
-                        scraped = scrape_url_with_playwright(url)
+                        scraped = scrape_url_with_playwright(url, session_id=session_id)
                         if scraped and not _is_captcha_or_blocked(scraped):
                             search_ran  = True
                             context += (
@@ -1046,21 +1167,48 @@ def process_user_message(
 
         return context, search_ran, browser_ran
 
-    # ── Launch all three in parallel ──────────────────────────────────────
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        f_summarize = executor.submit(_worker_summarize)
-        f_plan      = executor.submit(_worker_plan)
-        f_search    = executor.submit(_worker_search)
-        concurrent.futures.wait([f_summarize, f_plan, f_search])
+    # ── Launch pre-flight workers in parallel (non-blocking) ───────────────
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+    f_summarize = executor.submit(_worker_summarize)
+    f_plan      = executor.submit(_worker_plan)
+    f_search    = executor.submit(_worker_search)
 
-    # Final stop check after all workers finish
+    # Search is the critical path; plan is optional enrichment
+    done, _ = concurrent.futures.wait([f_summarize, f_search], timeout=15.0)
+    
+    _plan_timeout = 25.0 if _is_complex_task(prompt) else 10.0
+    plan_done, _ = concurrent.futures.wait([f_plan], timeout=_plan_timeout)
+
+    # Clean up immediately without blocking the response
+    executor.shutdown(wait=False)
+
+    # Final stop check after workers finish or timeout
     if is_stopped(session_id):
         return {"answer": "⏹️ Task stopped by user.", "provider": "System", "search_label": ""}
 
-    plan_result = f_plan.result() or ""
+    # ── Safe result retrieval ─────────────────────────────────────────────
+    # Planner worker (optional)
+    plan_result = ""
+    if f_plan in plan_done:
+        try:
+            # Short timeout here as it should already be done or cancelled
+            plan_result = f_plan.result(timeout=0.1) or ""
+        except Exception as e:
+            logger.warning("Planner worker failed or timed out: %s", e)
+
     plan_context = f"\n\n[Task plan — follow these steps]\n{plan_result}\n[End of plan]" if plan_result else ""
 
-    search_context, search_ran, browser_ran = f_search.result()
+    # Search worker (critical path)
+    search_context = ""
+    search_ran     = False
+    browser_ran    = False
+    if f_search in done:
+        try:
+            search_context, search_ran, browser_ran = f_search.result(timeout=0.1)
+        except Exception as e:
+            logger.warning("Search worker failed or timed out: %s", e)
+    else:
+        logger.warning("Search worker timed out (15s deadline)")
 
     # Layer 1: working memory
     raw_history  = load_history(session_id, limit=HISTORY_LIMIT)
@@ -1074,7 +1222,17 @@ def process_user_message(
         removed = api_messages.pop(0)
         total  -= len(removed["content"])
 
-    api_messages.append({"role": "user", "content": prompt + plan_context + search_context})
+    if plan_result and not is_stopped(session_id):
+        # Inject plan as assistant context — prevents stalling and forces execution
+        api_messages.append({"role": "user", "content": prompt + (search_context or "")})
+        api_messages.append({
+            "role": "assistant", 
+            "content": f"Execution plan:\n{plan_result}\n\nExecuting now..."
+        })
+    else:
+        # Standard flow: minimal context for non-complex tasks
+        user_content = prompt + (search_context or "")
+        api_messages.append({"role": "user", "content": user_content})
 
     # Agentic loop — Lever 3: complex tasks get more rounds
     is_complex = _is_complex_task(prompt)

@@ -17,17 +17,17 @@ import sys
 import asyncio
 import random
 import time
+import logging
+from typing import Dict, Any, Optional
+from .config import SCRAPE_CHAR_LIMIT
 
 # ── Fix: Python 3.13 + Windows + Streamlit asyncio compatibility ──────────────
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-from typing import Dict, Any
-
-# ── module-level state ─────────────────────────────────────────────────────────
-_playwright_ctx = None
-_browser        = None
-_page           = None
+# ── session-scoped state ────────────────────────────────────────────────────────
+# Maps session_id → {"pw": playwright, "browser": browser, "page": page}
+_sessions: Dict[str, Dict[str, Any]] = {}
 
 # CAPTCHA / bot-block signals — if any appear in page text, return blocked signal
 _CAPTCHA_SIGNALS = [
@@ -38,37 +38,70 @@ _CAPTCHA_SIGNALS = [
     "enable javascript", "ray id",
 ]
 
+# ── RC20: Health Check Helpers ──────────────────────────────────────────────────
+
+def _is_page_poisoned(page) -> bool:
+    """Check if the page is dead, closed, or showing a CAPTCHA/Block screen."""
+    try:
+        # 1. Physical checks
+        if page.is_closed():
+            return True
+        if not page.context.browser or not page.context.browser.is_connected():
+            return True
+            
+        # 2. Content-based poisoning checks
+        url = page.url.lower()
+        if "cloudflare" in url or "captcha" in url:
+            return True
+            
+        title = page.title().lower()
+        # Common block signals in page titles
+        if any(s in title for s in ["captcha", "robot", "human verification", "access denied", "403 forbidden"]):
+            return True
+            
+        return False
+    except Exception:
+        return True # Assume poisoned if any check fails (safest)
 
 def _human_delay(min_ms: int = 600, max_ms: int = 2000):
     """Random pause simulating human reading/thinking time."""
     time.sleep(random.uniform(min_ms, max_ms) / 1000)
 
 
-def _ensure_browser(headless: bool = False):
-    """Launch browser with stealth patches if not already running."""
-    global _playwright_ctx, _browser, _page
-    if _page is not None:
-        return
+def _get_session_page(session_id: str, headless: bool = True):
+    """Get or create isolated page for this session."""
+    global _sessions
+    
+    # ── RC20: Health Check ──────────────────────────────────────────────────
+    if session_id in _sessions:
+        sess = _sessions[session_id]
+        page = sess.get("page")
+        if page:
+            if _is_page_poisoned(page):
+                logging.getLogger("browser").info(f"Session {session_id} page is poisoned/closed. Resetting...")
+                browser_close(session_id)
+            else:
+                return page
+    # ── End Health Check ────────────────────────────────────────────────────
 
     from playwright.sync_api import sync_playwright
-    _playwright_ctx = sync_playwright().start()
-    _browser = _playwright_ctx.chromium.launch(
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(
         headless = headless,
         args = [
             "--disable-blink-features=AutomationControlled",
             "--disable-infobars",
             "--no-sandbox",
+            "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--disable-plugins-discovery",
             "--disable-extensions-except=",
-            # Mimic real Chrome install
             "--enable-features=NetworkService,NetworkServiceLogging",
-            "--disable-web-security",
         ],
     )
 
-    context = _browser.new_context(
+    context = browser.new_context(
         user_agent      = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -80,46 +113,49 @@ def _ensure_browser(headless: bool = False):
         device_scale_factor = 1,
         has_touch       = False,
         java_script_enabled = True,
-        # Accept all content types real browsers accept
         extra_http_headers = {
             "Accept-Language": "en-US,en;q=0.9",
             "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
     )
-    _page = context.new_page()
+    page = context.new_page()
 
-    # Apply playwright-stealth — patches 25+ automation detection vectors
+    # Apply playwright-stealth
     try:
         from playwright_stealth import stealth_sync
-        stealth_sync(_page)
+        stealth_sync(page)
     except ImportError:
-        # stealth not installed — still works but detection risk is higher
-        _page.add_init_script(
+        page.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
 
-    # Fallback webdriver hide (belt + suspenders)
-    _page.add_init_script(
+    # Fallback webdriver hide
+    page.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
+    
+    _sessions[session_id] = {"pw": pw, "browser": browser, "page": page}
+    return page
 
 
-def _page_snapshot(max_chars: int = 4000) -> str:
-    """Return a readable text snapshot of the current page."""
-    global _page
-    if _page is None:
+def _page_snapshot(page, max_chars: int = 4000) -> str:
+    """Return a readable text snapshot of a page."""
+    if page is None:
         return "(no page open)"
     try:
-        title = _page.title()
-        url   = _page.url
-        text  = _page.evaluate(
+        title = page.title()
+        url   = page.url
+        text  = page.evaluate(
             """() => {
-                const els = document.querySelectorAll(
-                    'h1,h2,h3,h4,p,li,a,button,input,label,span,td,th'
-                );
+                const selectors = [
+                    'h1', 'h2', 'h3', 'h4', 'p', 'li', 'a', 'button', 'input', 
+                    'label', 'span', 'td', 'th', 'table', 'tr',
+                    '[class*="result"]', '[class*="row"]', '[class*="item"]'
+                ];
+                const els = document.querySelectorAll(selectors.join(','));
                 return Array.from(els)
                     .map(el => (el.innerText || el.value || '').trim())
-                    .filter(t => t && t.length > 1)
+                    .filter(t => t && t.length > 2)
                     .join('\\n');
             }"""
         )
@@ -145,26 +181,51 @@ def _check_for_captcha(snapshot: str, url: str) -> str | None:
 
 # ── public actions ─────────────────────────────────────────────────────────────
 
-def browser_navigate(url: str) -> str:
-    """Navigate to a URL with human-like behaviour. Returns text snapshot or CAPTCHA signal."""
-    global _page
+def scrape_url_with_playwright(url: str, session_id: str = "default") -> Optional[str]:
+    """One-shot scrape of a URL using an isolated session context."""
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    
+    try:
+        page = _get_session_page(session_id)
+        # Navigation with defensive wait
+        page.goto(url, timeout=30000, wait_until="domcontentloaded")
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass # Continue even if network doesn't settle perfectly
+
+        snapshot = _page_snapshot(page)
+        blocked = _check_for_captcha(snapshot, url)
+        
+        content = blocked or snapshot
+        if content:
+            return content[:SCRAPE_CHAR_LIMIT]
+        return None
+    except Exception as e:
+        logging.getLogger("browser").warning("scrape_url_with_playwright failed: %s", e)
+        return None
+
+
+def browser_navigate(url: str, session_id: str = "default") -> str:
+    """Navigate to a URL with isolated context. Returns text snapshot or CAPTCHA signal."""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
     try:
-        _ensure_browser()
+        page = _get_session_page(session_id)
         # Human-like pre-navigation pause
         _human_delay(400, 1200)
-        _page.goto(url, timeout=30000, wait_until="domcontentloaded")
+        page.goto(url, timeout=30000, wait_until="domcontentloaded")
         # Wait for JS to settle + simulate reading time
         _human_delay(1500, 3000)
-        # Move mouse to a random position — real users do this on page load
-        _page.mouse.move(
+        # Move mouse to a random position
+        page.mouse.move(
             random.randint(100, 900),
             random.randint(100, 600),
         )
         _human_delay(200, 600)
 
-        snapshot = _page_snapshot()
+        snapshot = _page_snapshot(page)
 
         # CAPTCHA check before returning
         blocked = _check_for_captcha(snapshot, url)
@@ -176,112 +237,105 @@ def browser_navigate(url: str) -> str:
         return f"(browser_navigate failed: {e})"
 
 
-def browser_click(target: str) -> str:
-    """Click an element by visible text or CSS selector."""
-    global _page
-    if _page is None:
-        return "(no browser open — navigate somewhere first)"
+def browser_click(target: str, session_id: str = "default") -> str:
+    """Click an element in the session's isolated context."""
+    page = _get_session_page(session_id)
     try:
         try:
-            _page.get_by_text(target, exact=False).first.click(timeout=8000)
+            page.get_by_text(target, exact=False).first.click(timeout=8000)
         except Exception:
-            _page.click(target, timeout=8000)
+            page.click(target, timeout=8000)
         _human_delay(800, 1500)
-        snapshot = _page_snapshot()
-        blocked  = _check_for_captcha(snapshot, _page.url)
+        snapshot = _page_snapshot(page)
+        blocked  = _check_for_captcha(snapshot, page.url)
         return blocked or snapshot
     except Exception as e:
         return f"(browser_click failed — could not find '{target}': {e})"
 
 
-def browser_type(selector: str, text: str, press_enter: bool = False) -> str:
-    """Type text into an input field identified by placeholder, label, or CSS selector."""
-    global _page
-    if _page is None:
-        return "(no browser open — navigate somewhere first)"
+def browser_type(selector: str, text: str, press_enter: bool = False, session_id: str = "default") -> str:
+    """Type text into an input field in the session's isolated context."""
+    page = _get_session_page(session_id)
     try:
         try:
-            loc = _page.get_by_placeholder(selector, exact=False).first
+            loc = page.get_by_placeholder(selector, exact=False).first
             loc.click(timeout=5000)
-            # Type character by character like a human (slower but less detectable)
+            # Type character by character like a human
             for char in text:
                 loc.type(char)
                 time.sleep(random.uniform(0.04, 0.12))
         except Exception:
             try:
-                loc = _page.get_by_label(selector, exact=False).first
+                loc = page.get_by_label(selector, exact=False).first
                 loc.click(timeout=5000)
                 loc.fill(text)
             except Exception:
-                _page.click(selector, timeout=5000)
-                _page.fill(selector, text)
+                page.click(selector, timeout=5000)
+                page.fill(selector, text)
 
         if press_enter:
             _human_delay(300, 700)
-            _page.keyboard.press("Enter")
+            page.keyboard.press("Enter")
             _human_delay(1500, 3000)
 
-        snapshot = _page_snapshot()
-        blocked  = _check_for_captcha(snapshot, _page.url)
+        snapshot = _page_snapshot(page)
+        blocked  = _check_for_captcha(snapshot, page.url)
         return blocked or snapshot
     except Exception as e:
         return f"(browser_type failed — could not find '{selector}': {e})"
 
 
-def browser_get_page_text() -> str:
-    """Return a text snapshot of whatever page is open."""
-    if _page is None:
-        return "(no page open)"
-    snapshot = _page_snapshot()
-    blocked  = _check_for_captcha(snapshot, _page.url if _page else "")
+def browser_get_page_text(session_id: str = "default") -> str:
+    """Return a text snapshot of the session's open page."""
+    page = _get_session_page(session_id)
+    snapshot = _page_snapshot(page)
+    blocked  = _check_for_captcha(snapshot, page.url)
     return blocked or snapshot
 
 
-def browser_close() -> str:
-    """Close the browser session."""
-    global _playwright_ctx, _browser, _page
+def browser_close(session_id: str = "default") -> str:
+    """Close the isolated browser session."""
+    global _sessions
     try:
-        if _browser:
-            _browser.close()
-        if _playwright_ctx:
-            _playwright_ctx.stop()
+        sess = _sessions.pop(session_id, None)
+        if sess:
+            if sess.get("browser"):
+                sess["browser"].close()
+            if sess.get("pw"):
+                sess["pw"].stop()
     except Exception:
         pass
-    _playwright_ctx = None
-    _browser        = None
-    _page           = None
-    return "(browser closed)"
+    return f"(browser closed for session {session_id})"
 
 
-# ── top-level dispatcher ───────────────────────────────────────────────────────
-
-def run_browser_action(intent: Dict[str, Any]) -> str:
-    """Execute a browser action based on a detected intent dict."""
+def run_browser_action(intent: Dict[str, Any], session_id: str = "default") -> str:
+    """Execute a browser action based on a detected intent dict and session context."""
     action = intent.get("action")
 
     if action == "navigate":
-        return browser_navigate(intent["url"])
+        return browser_navigate(intent["url"], session_id=session_id)
 
     elif action == "search":
-        result = browser_navigate("https://www.google.com")
+        result = browser_navigate("https://www.google.com", session_id=session_id)
         if "failed" in result or "CAPTCHA" in result:
             return result
-        return browser_type("Search", intent["query"], press_enter=True)
+        return browser_type("Search", intent["query"], press_enter=True, session_id=session_id)
 
     elif action == "click":
-        return browser_click(intent["target"])
+        return browser_click(intent["target"], session_id=session_id)
 
     elif action == "type":
         return browser_type(
             intent["target"],
             intent["text"],
             press_enter=intent.get("press_enter", False),
+            session_id=session_id
         )
 
     elif action == "read":
-        return browser_get_page_text()
+        return browser_get_page_text(session_id=session_id)
 
     elif action == "close":
-        return browser_close()
+        return browser_close(session_id=session_id)
 
     return "(unknown browser action)"

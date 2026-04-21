@@ -4,4 +4,4 @@ call venv\Scripts\activate
 echo Starting AI Assistant on http://localhost:8000
 echo Press Ctrl+C to stop.
 start "" cmd /c "timeout /t 3 /nobreak >nul & start http://localhost:8000"
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload

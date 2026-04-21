@@ -11,7 +11,8 @@ os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     filename="logs/audit.log",
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    encoding="utf-8"
 )
 logger = logging.getLogger("meta_skill_loop")
 
@@ -176,7 +177,7 @@ def register_skill(skill_name: str, filepath: str, plan: str):
 
 def run_meta_skill_loop(skill_name: str, max_attempts: int = 3, session_id: str = None, target_url: str = None) -> str:
     from core.signals import is_stopped
-    from core.scraper import scrape_url_with_playwright
+    from core.browser import scrape_url_with_playwright
     
     logger.info(f"Starting meta-skill generation for '{skill_name}'")
     

@@ -38,7 +38,7 @@ This file contains the specific triggers and commands needed to interact with th
 **What it does:**
 1. Detects "Business Lookup" intent.
 2. Searches the web specifically for official government registry URLs (e.g. `.gov`, `sos.`, `corporations`).
-3. Uses the Playwright scraper to bypass Javascript-heavy pages and extract the visible registry table.
+3. Uses the unified browser engine to bypass Javascript-heavy pages and extract the visible registry table.
 4. Feeds the legal registry data (Owner names, Registered Agents, etc) directly into the LLM's context window.
 
 ## 4. Web Search Toggle

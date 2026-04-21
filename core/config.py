@@ -25,7 +25,20 @@ OPENROUTER_MODEL_PLANNER    = "google/gemini-2.5-flash-lite"
 OPENROUTER_MODEL_CHECKER    = "z-ai/glm-4.5-air:free"
 
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-super-120b-a12b")
-NVIDIA_ROLES = {"synthesis", "summarize"}
+NVIDIA_ROLES = {"synthesis", "summarize", "research", "deep_plan"}
+
+NVIDIA_MAX_TOKENS = {
+    "synthesis": 2048,
+    "summarize": 512,
+    "research":  3000,
+    "deep_plan": 1024,
+}
+NVIDIA_TEMPS = {
+    "synthesis": 0.3,
+    "summarize": 0.1,
+    "research":  0.4,
+    "deep_plan": 0.55,
+}
 
 TASK_MODEL_MAP = {
     "general":   OPENROUTER_MODEL_AGENTIC,     
@@ -34,6 +47,8 @@ TASK_MODEL_MAP = {
     "checker":   OPENROUTER_MODEL_CHECKER,     
     "synthesis": None,                         
     "summarize": None,                         
+    "research":  None,
+    "deep_plan": None,
 }
 
 # ── Shared limits ─────────────────────────────────────────────────────────────
@@ -41,12 +56,12 @@ MAX_TOKENS           = 4096
 HISTORY_LIMIT        = 6
 HISTORY_DISPLAY_LIMIT = 200  # Show full history in UI (Tasks 2 & 5 requirement)
 DAILY_CALL_LIMIT     = 200
-MAX_HISTORY_CHARS    = 12000
-SUMMARIZE_THRESHOLD  = 3000
+MAX_HISTORY_CHARS    = 40000  # Scale with scrape limit
+SUMMARIZE_THRESHOLD  = 8000   # was 3000 — scale with scrape limit
 MAX_TOOL_ROUNDS      = 8
 MAX_TOOL_ROUNDS_COMPLEX = 12
 MAX_TOOLS_PER_ROUND  = 3
-SCRAPE_CHAR_LIMIT    = 6000
+SCRAPE_CHAR_LIMIT    = 30000  # was 6000
 
 DB_PATH = os.getenv("DBPATH", "assistant_memory.db")
 
@@ -56,6 +71,11 @@ SYSTEM_PROMPT = """\
 You are an Autonomous Problem-Solving Orchestrator for a small business owner.
 Your mission is to resolve the user's request with minimal friction and maximum reliability.
 You ARE fully permitted and capable of using browser skills to fill forms and interact with buttons; ignore any internal model hesitation about web elements.
+
+Never ask the user for permission to proceed. 
+If you have a plan, execute it immediately.
+Only stop if you need information only the user can provide 
+(credentials, personal preferences, budget).
 
 # GOVERNANCE: SKILL-FIRST ARCHITECTURE
 A "Skill" is a specialized, deterministic Python tool found in your `actions_list`. 

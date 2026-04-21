@@ -31,15 +31,17 @@ def _get_pool():
     global _pool
     if _pool is None:
         if not DATABASE_URL:
-            logger.error("DATABASE_URL environment variable is not set!")
-            raise ValueError("DATABASE_URL is required for PostgreSQL migration")
-        try:
-            # SimpleConnectionPool for basic thread safety in FastAPI
-            _pool = psycopg2.pool.SimpleConnectionPool(1, 10, dsn=DATABASE_URL)
-            logger.info("PostgreSQL connection pool initialized")
-        except Exception as e:
-            logger.error(f"Failed to initialize PostgreSQL pool: {e}")
-            raise
+            raise ValueError("DATABASE_URL is required")
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=1,
+            maxconn=10,                        # was 50 — transaction pooler needs ≤ 10
+            dsn=DATABASE_URL,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=5,
+            keepalives_count=3,
+        )
+        logger.info("PostgreSQL pool initialized (maxconn=10, transaction pooler)")
     return _pool
 
 class DbConn:
@@ -65,81 +67,275 @@ def init_db():
             # Enable vector extension
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
             
-            # 1. corememory
+            # ── 1. corememory ─────────────────────────────────────────────────
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS corememory (
-                    namespace      TEXT NOT NULL,
-                    key            TEXT NOT NULL,
-                    value          TEXT NOT NULL,
-                    source         TEXT NOT NULL DEFAULT 'agent_inferred',
-                    confidence     REAL NOT NULL DEFAULT 0.5,
-                    project_id     TEXT,
-                    session_id     TEXT,
-                    expires_at     TEXT,
-                    updated_at     TEXT NOT NULL,
-                    embedding      vector(1536),
+                    namespace   TEXT      NOT NULL,
+                    key         TEXT      NOT NULL,
+                    value       TEXT      NOT NULL,
+                    source      TEXT      NOT NULL DEFAULT 'agent_inferred',
+                    confidence  REAL      NOT NULL DEFAULT 0.5,
+                    project_id  TEXT,
+                    session_id  TEXT,
+                    expires_at  TIMESTAMP,
+                    updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                    embedding   vector(1536),
+                    memory_type TEXT NOT NULL DEFAULT 'fact',
                     PRIMARY KEY (namespace, key)
                 )
             """)
-            
-            # 2. conversations
+            cur.execute("ALTER TABLE corememory ENABLE ROW LEVEL SECURITY")
+
+            # Migration: convert expires_at TEXT → TIMESTAMP for existing tables
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id SERIAL PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    timestamp TEXT NOT NULL
-                )
-            """)
-            
-            # 3. call_log
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS call_log (
-                    id SERIAL PRIMARY KEY,
-                    date TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    timestamp TEXT NOT NULL
-                )
-            """)
-            
-            # 4. search_cache
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS search_cache (
-                    id SERIAL PRIMARY KEY,
-                    query_key TEXT NOT NULL UNIQUE,
-                    result TEXT NOT NULL,
-                    cached_at TEXT NOT NULL
-                )
-            """)
-            
-            # 5. session_names
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS session_names (
-                    session_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            """)
-            
-            # 6. sessionsummaries
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS sessionsummaries (
-                    session_id   TEXT PRIMARY KEY,
-                    summary_text TEXT NOT NULL,
-                    updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='corememory'
+                        AND column_name='expires_at'
+                        AND data_type='text'
+                    ) THEN
+                        ALTER TABLE corememory
+                            ALTER COLUMN expires_at TYPE TIMESTAMP
+                            USING expires_at::TIMESTAMP;
+                        ALTER TABLE corememory
+                            ALTER COLUMN updated_at TYPE TIMESTAMP
+                            USING updated_at::TIMESTAMP;
+                    END IF;
+                    -- Ensure DEFAULT NOW() is set (Fix for RC13)
+                    ALTER TABLE corememory ALTER COLUMN updated_at SET DEFAULT NOW();
+                END $$;
             """)
 
-            # 7. active_tasks
+            # Migration: add embedding column if missing
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='corememory' AND column_name='embedding'
+                    ) THEN
+                        ALTER TABLE corememory ADD COLUMN embedding vector(1536);
+                    END IF;
+                END $$;
+            """)
+
+            # Migration: add memory_type column if missing (RC14)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='corememory' AND column_name='memory_type'
+                    ) THEN
+                        ALTER TABLE corememory ADD COLUMN memory_type TEXT NOT NULL DEFAULT 'fact';
+                    END IF;
+                END $$;
+            """)
+            
+            # ── 2. conversations ──────────────────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id         SERIAL PRIMARY KEY,
+                    session_id TEXT      NOT NULL,
+                    role       TEXT      NOT NULL,
+                    content    TEXT      NOT NULL,
+                    timestamp  TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("ALTER TABLE conversations ENABLE ROW LEVEL SECURITY")
+
+            # Fix 3: index for fast history lookups
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_conversations_session_id
+                ON conversations(session_id)
+            """)
+
+            # Migration: ensure conversations.timestamp is TIMESTAMP
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF (
+                        SELECT data_type FROM information_schema.columns
+                        WHERE table_name='conversations' AND column_name='timestamp'
+                    ) = 'text' THEN
+                        ALTER TABLE conversations
+                            ALTER COLUMN timestamp TYPE TIMESTAMP
+                            USING timestamp::TIMESTAMP;
+                    END IF;
+                    -- Ensure DEFAULT NOW() is set (Fix for RC13)
+                    ALTER TABLE conversations ALTER COLUMN timestamp SET DEFAULT NOW();
+                END $$;
+            """)
+
+            # ── 3. call_log ───────────────────────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS call_log (
+                    id        SERIAL PRIMARY KEY,
+                    date      TEXT      NOT NULL,
+                    provider  TEXT      NOT NULL,
+                    timestamp TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("ALTER TABLE call_log ENABLE ROW LEVEL SECURITY")
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_call_log_date
+                ON call_log(date)
+            """)
+
+            # Migration: ensure call_log.timestamp is TIMESTAMP
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF (
+                        SELECT data_type FROM information_schema.columns
+                        WHERE table_name='call_log' AND column_name='timestamp'
+                    ) = 'text' THEN
+                        ALTER TABLE call_log
+                            ALTER COLUMN timestamp TYPE TIMESTAMP
+                            USING timestamp::TIMESTAMP;
+                    END IF;
+                    -- Ensure DEFAULT NOW() is set (Fix for RC13)
+                    ALTER TABLE call_log ALTER COLUMN timestamp SET DEFAULT NOW();
+                END $$;
+            """)
+            
+            # ── 4. search_cache ───────────────────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS search_cache (
+                    id        SERIAL    PRIMARY KEY,
+                    query_key TEXT      NOT NULL UNIQUE,
+                    result    TEXT      NOT NULL,
+                    cached_at TIMESTAMP NOT NULL DEFAULT NOW()
+                 )
+            """)
+            cur.execute("ALTER TABLE search_cache ENABLE ROW LEVEL SECURITY")
+
+            # Migration: ensure search_cache.cached_at is TIMESTAMP
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF (
+                        SELECT data_type FROM information_schema.columns
+                        WHERE table_name='search_cache' AND column_name='cached_at'
+                    ) = 'text' THEN
+                        ALTER TABLE search_cache
+                            ALTER COLUMN cached_at TYPE TIMESTAMP
+                            USING cached_at::TIMESTAMP;
+                    END IF;
+                    -- Ensure DEFAULT NOW() is set (Fix for RC13)
+                    ALTER TABLE search_cache ALTER COLUMN cached_at SET DEFAULT NOW();
+                END $$;
+            """)
+
+            # ── 5. session_names ──────────────────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS session_names (
+                    session_id TEXT      PRIMARY KEY,
+                    name       TEXT      NOT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("ALTER TABLE session_names ENABLE ROW LEVEL SECURITY")
+
+            # Migration: ensure session_names.updated_at is TIMESTAMP
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF (
+                        SELECT data_type FROM information_schema.columns
+                        WHERE table_name='session_names' AND column_name='updated_at'
+                    ) = 'text' THEN
+                        ALTER TABLE session_names
+                            ALTER COLUMN updated_at TYPE TIMESTAMP
+                            USING updated_at::TIMESTAMP;
+                    END IF;
+                END $$;
+            """)
+            
+            # ── 6. sessionsummaries ───────────────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sessionsummaries (
+                    session_id   TEXT      PRIMARY KEY,
+                    summary_text TEXT      NOT NULL,
+                    updated_at   TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("ALTER TABLE sessionsummaries ENABLE ROW LEVEL SECURITY")
+
+            # Migration: ensure sessionsummaries.updated_at is TIMESTAMP
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF (
+                        SELECT data_type FROM information_schema.columns
+                        WHERE table_name='sessionsummaries' AND column_name='updated_at'
+                    ) = 'text' THEN
+                        ALTER TABLE sessionsummaries
+                            ALTER COLUMN updated_at TYPE TIMESTAMP
+                            USING updated_at::TIMESTAMP;
+                    END IF;
+                END $$;
+            """)
+
+            # ── 7. active_tasks ───────────────────────────────────────────────
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS active_tasks (
-                    session_id   TEXT PRIMARY KEY,
-                    task_type    TEXT NOT NULL,
-                    task_input   TEXT NOT NULL,
-                    task_status  TEXT NOT NULL,
-                    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    session_id  TEXT      PRIMARY KEY,
+                    task_type   TEXT      NOT NULL,
+                    task_input  TEXT      NOT NULL,
+                    task_status TEXT      NOT NULL,
+                    updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
                 )
+            """)
+            cur.execute("ALTER TABLE active_tasks ENABLE ROW LEVEL SECURITY")
+
+            # ── 8. llm_traces (Centralized in init_db) ─────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS llm_traces (
+                    id         SERIAL    PRIMARY KEY,
+                    ts         TIMESTAMP NOT NULL DEFAULT NOW(),
+                    task_type  TEXT      NOT NULL,
+                    provider   TEXT      NOT NULL,
+                    test_mode  BOOLEAN   NOT NULL,
+                    input_msgs TEXT      NOT NULL,
+                    response   TEXT      NOT NULL,
+                    latency_s  REAL                -- ← RC19: Latency tracking
+                )
+            """)
+            cur.execute("ALTER TABLE llm_traces ENABLE ROW LEVEL SECURITY")
+
+            # Migration: add latency_s column if missing (RC19)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='llm_traces' AND column_name='latency_s'
+                    ) THEN
+                        ALTER TABLE llm_traces ADD COLUMN latency_s REAL;
+                    END IF;
+                END $$;
+            """)
+
+            # RC17: HNSW vector index
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_indexes
+                        WHERE tablename = 'corememory'
+                        AND indexname = 'idx_corememory_embedding'
+                    ) THEN
+                        EXECUTE 'CREATE INDEX idx_corememory_embedding
+                                 ON corememory
+                                 USING hnsw (embedding vector_cosine_ops)
+                                 WITH (m = 16, ef_construction = 64)';
+                        RAISE NOTICE 'HNSW index created on corememory';
+                    END IF;
+                END $$;
             """)
     logger.info("PostgreSQL database initialized successfully")
 
@@ -173,7 +369,7 @@ def _embed(text: str) -> list[float]:
     )
     return resp.data[0].embedding
 
-def search_memory_semantic(query: str, limit: int = 6, namespaces: list[str] = None) -> list[dict]:
+def search_memory_semantic(query: str, limit: int = 6, namespaces: list[str] = None, memory_types: list[str] = None) -> list[dict]:
     """
     Return top-k corememory rows most similar to query.
     Falls back to full scan if no embeddings exist yet (cold start).
@@ -182,19 +378,30 @@ def search_memory_semantic(query: str, limit: int = 6, namespaces: list[str] = N
         vec = _embed(query)
         vec_str = "[" + ",".join(str(x) for x in vec) + "]"
         ns_filter = ""
+        type_filter = ""
         params = [vec_str, limit]
+        
         if namespaces:
             ns_filter = "AND namespace = ANY(%s)"
-            params = [vec_str, namespaces, limit]
+            params = [namespaces, vec_str, limit]
+            
+        if memory_types:
+            type_filter = "AND memory_type = ANY(%s)"
+            # Insert at the beginning of params to match query structure
+            if namespaces:
+                params = [namespaces, memory_types, vec_str, limit]
+            else:
+                params = [memory_types, vec_str, limit]
             
         with DbConn() as conn:
             # Use RealDictCursor to match the existing dict return pattern
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(f"""
-                    SELECT namespace, key, value, confidence, source, expires_at
+                    SELECT namespace, key, value, confidence, source, expires_at, memory_type
                     FROM corememory
                     WHERE (expires_at IS NULL OR expires_at > NOW())
                     {ns_filter}
+                    {type_filter}
                     ORDER BY embedding <=> %s::vector
                     LIMIT %s
                 """, params)
@@ -204,11 +411,11 @@ def search_memory_semantic(query: str, limit: int = 6, namespaces: list[str] = N
         return get_core_memory(namespace=namespaces[0] if namespaces and len(namespaces) == 1 else None)
 
 def upsert_memory_with_embedding(namespace, key, value, source, confidence,
-                                  session_id=None, expires_days=None) -> bool:
+                                  session_id=None, expires_days=None, memory_type="fact") -> bool:
     """Write a memory fact AND its embedding in one call."""
     # First do the normal write
     success = update_core_memory(namespace, key, value, source, confidence,
-                                  session_id=session_id, expires_days=expires_days)
+                                  session_id=session_id, expires_days=expires_days, memory_type=memory_type)
     if not success:
         return False
         
@@ -250,6 +457,7 @@ def update_core_memory(
     project_id: Optional[str] = None,
     session_id: Optional[str] = None,
     expires_days: Optional[int] = None,
+    memory_type: str = "fact",
 ) -> bool:
     if namespace == NS_AGENT or namespace == "agent":
         return False
@@ -259,25 +467,26 @@ def update_core_memory(
 
     expires_at = None
     if expires_days:
-        expires_at = (datetime.now() + timedelta(days=expires_days)).isoformat()
+        expires_at = datetime.now() + timedelta(days=expires_days)   # ← no .isoformat()
     elif namespace == NS_TASK:
-        expires_at = (datetime.now() + timedelta(days=7)).isoformat()
+        expires_at = datetime.now() + timedelta(days=7)              # ← no .isoformat()
 
     with DbConn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO corememory
-                    (namespace, key, value, source, confidence, project_id, session_id, expires_at, updated_at)
+                    (namespace, key, value, source, confidence, project_id, session_id, expires_at, memory_type)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (namespace, key) DO UPDATE SET
-                    value      = CASE WHEN EXCLUDED.confidence >= corememory.confidence
-                                      THEN EXCLUDED.value ELSE corememory.value END,
-                    confidence = GREATEST(EXCLUDED.confidence, corememory.confidence),
-                    source     = EXCLUDED.source,
-                    expires_at = EXCLUDED.expires_at,
-                    updated_at = EXCLUDED.updated_at
+                    value       = CASE WHEN EXCLUDED.confidence >= corememory.confidence
+                                       THEN EXCLUDED.value ELSE corememory.value END,
+                    confidence  = GREATEST(EXCLUDED.confidence, corememory.confidence),
+                    source      = EXCLUDED.source,
+                    expires_at  = EXCLUDED.expires_at,
+                    memory_type = EXCLUDED.memory_type,
+                    updated_at  = NOW()
             """, (namespace, key, value, source, confidence, project_id,
-                  session_id, expires_at, datetime.now().isoformat()))
+                  session_id, expires_at, memory_type))
     return True
 
 def get_core_memory(namespace: Optional[str] = None) -> list[dict]:
@@ -285,19 +494,20 @@ def get_core_memory(namespace: Optional[str] = None) -> list[dict]:
         with conn.cursor() as cur:
             if namespace:
                 cur.execute(
-                    "SELECT namespace, key, value, confidence, source, expires_at "
+                    "SELECT namespace, key, value, confidence, source, expires_at, memory_type "
                     "FROM corememory WHERE namespace = %s ORDER BY key",
                     (namespace,)
                 )
             else:
                 cur.execute(
-                    "SELECT namespace, key, value, confidence, source, expires_at "
+                    "SELECT namespace, key, value, confidence, source, expires_at, memory_type "
                     "FROM corememory ORDER BY namespace, key"
                 )
             rows = cur.fetchall()
             return [
                 {"namespace": r[0], "key": r[1], "value": r[2],
-                 "confidence": r[3], "source": r[4], "expires_at": r[5]}
+                 "confidence": r[3], "source": r[4], "expires_at": r[5],
+                 "memory_type": r[6]}
                 for r in rows
             ]
 
@@ -305,8 +515,7 @@ def purge_expired_memory():
     with DbConn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM corememory WHERE expires_at IS NOT NULL AND expires_at < %s",
-                (datetime.now().isoformat(),)
+                "DELETE FROM corememory WHERE expires_at IS NOT NULL AND expires_at < NOW()",
             )
             count = cur.rowcount
             if count:
@@ -338,8 +547,8 @@ def log_call(provider: str):
     with DbConn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO call_log (date, provider, timestamp) VALUES (%s, %s, %s)",
-                (datetime.now().strftime("%Y-%m-%d"), provider, datetime.now().isoformat()),
+                "INSERT INTO call_log (date, provider) VALUES (%s, %s)",
+                (datetime.now().strftime("%Y-%m-%d"), provider),
             )
 
 def daily_call_count() -> int:
@@ -359,8 +568,8 @@ def save_message(session_id: str, role: str, content: str):
     with DbConn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO conversations (session_id, role, content, timestamp) VALUES (%s, %s, %s, %s)",
-                (session_id, role, content, datetime.now().isoformat()),
+                "INSERT INTO conversations (session_id, role, content) VALUES (%s, %s, %s)",
+                (session_id, role, content),
             )
 
 def load_history(session_id: str, limit: int):
@@ -372,6 +581,18 @@ def load_history(session_id: str, limit: int):
             )
             rows = cur.fetchall()
             return [{"role": r, "content": c} for r, c in reversed(rows)]
+
+def _delete_oldest_messages(session_id: str, count: int):
+    """Delete oldest messages for a session to prevent context overflow."""
+    with DbConn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM conversations WHERE id IN (
+                    SELECT id FROM conversations
+                    WHERE session_id = %s
+                    ORDER BY id ASC LIMIT %s
+                )
+            """, (session_id, count))
 
 def list_sessions(limit: int = 15):
     with DbConn() as conn:
@@ -392,8 +613,10 @@ def list_sessions(limit: int = 15):
 def delete_session(session_id: str):
     with DbConn() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM conversations WHERE session_id=%s", (session_id,))
-            cur.execute("DELETE FROM session_names WHERE session_id=%s", (session_id,))
+            cur.execute("DELETE FROM conversations      WHERE session_id=%s", (session_id,))
+            cur.execute("DELETE FROM session_names      WHERE session_id=%s", (session_id,))
+            cur.execute("DELETE FROM sessionsummaries   WHERE session_id=%s", (session_id,))  # ← new
+            cur.execute("DELETE FROM active_tasks       WHERE session_id=%s", (session_id,))  # ← new
 
 # ── Session naming ────────────────────────────────────────────────────────────
 
@@ -401,12 +624,12 @@ def save_session_name(session_id: str, name: str):
     with DbConn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO session_names (session_id, name, updated_at)
-                VALUES (%s, %s, %s)
+                INSERT INTO session_names (session_id, name)
+                VALUES (%s, %s)
                 ON CONFLICT (session_id) DO UPDATE SET 
                     name = EXCLUDED.name, 
-                    updated_at = EXCLUDED.updated_at
-            """, (session_id, name, datetime.now().isoformat()))
+                    updated_at = NOW()
+            """, (session_id, name))
 
 def get_session_name(session_id: str) -> str | None:
     with DbConn() as conn:
@@ -433,18 +656,13 @@ def get_cached_search(query: str, ttl_hours: int = 1) -> str | None:
     key = query.strip().lower()
     with DbConn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT result, cached_at FROM search_cache WHERE query_key=%s", (key,))
+            cur.execute("""
+                SELECT result FROM search_cache
+                WHERE query_key = %s
+                AND cached_at > NOW() - INTERVAL '1 hour' * %s
+            """, (key, ttl_hours))
             row = cur.fetchone()
-            if not row:
-                return None
-            result, cached_at_str = row
-            try:
-                cached_at = datetime.fromisoformat(cached_at_str)
-                if datetime.now() - cached_at > timedelta(hours=ttl_hours):
-                    return None
-                return result
-            except:
-                return None
+            return row[0] if row else None   # ← no manual datetime math needed
 
 def save_cached_search(query: str, result: str):
     key = query.strip().lower()
@@ -452,18 +670,18 @@ def save_cached_search(query: str, result: str):
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO search_cache (query_key, result, cached_at)
-                VALUES (%s, %s, %s)
+                VALUES (%s, %s, NOW())                  -- ← NOW() instead of Python string
                 ON CONFLICT (query_key) DO UPDATE SET
-                    result = EXCLUDED.result,
-                    cached_at = EXCLUDED.cached_at
-            """, (key, result, datetime.now().isoformat()))
+                    result    = EXCLUDED.result,
+                    cached_at = NOW()
+            """, (key, result))
 
 def purge_expired_cache(ttl_hours: int = 24):
     with DbConn() as conn:
         with conn.cursor() as cur:
             # Postgres interval math
             cur.execute(
-                "DELETE FROM search_cache WHERE CAST(cached_at AS TIMESTAMP) < NOW() - INTERVAL '1 hour' * %s",
+                "DELETE FROM search_cache WHERE cached_at < NOW() - INTERVAL '1 hour' * %s",
                 (ttl_hours,)
             )
 
@@ -501,3 +719,28 @@ def clear_active_task(session_id: str):
     with DbConn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM active_tasks WHERE session_id=%s", (session_id,))
+
+def ensure_embedding_column() -> bool:
+    """
+    Idempotent migration guard — runs AFTER init_db() in a fresh connection.
+    The vector extension must already be committed for vector(1536) to resolve.
+    Called from main.py startup, separate from init_db().
+    """
+    try:
+        with DbConn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) FROM information_schema.columns
+                    WHERE table_name = 'corememory' AND column_name = 'embedding'
+                """)
+                exists = cur.fetchone()[0]
+                if not exists:
+                    cur.execute(
+                        "ALTER TABLE corememory ADD COLUMN embedding vector(1536)"
+                    )
+                    logger.info("Migration applied: embedding column added to corememory")
+                    return True
+        return False
+    except Exception as e:
+        logger.error("ensure_embedding_column failed: %s", e)
+        return False

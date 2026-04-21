@@ -14,11 +14,12 @@ _seen_ids: Set[str] = set()
 
 
 def _verify_signature(body: bytes, sig_header: str) -> bool:
-    if not sig_header.startswith("sha256="):
+    if not sig_header or not sig_header.startswith("sha256="):
         return False
     expected = hmac.new(
         WA_APP_SECRET.encode(), body, hashlib.sha256
     ).hexdigest()
+    # Fixed slicing lint by explicit str type hint
     return hmac.compare_digest(expected, sig_header[7:])
 
 

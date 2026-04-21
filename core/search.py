@@ -122,6 +122,10 @@ def detect_browser_intent(prompt: str) -> dict:
 def search_web(query: str, max_results: int = 4) -> str | None:
     if not TAVILY_API_KEY:
         return None
+    
+    if len(query) > 200:
+        import logging; logging.getLogger("search").warning("Tavily query too long (%d chars), rejecting: %s", len(query), query[:100] + "...")
+        return None
     import time
 
     for attempt in range(2):

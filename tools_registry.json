@@ -21,9 +21,9 @@
             "description": "Universal website registration skill. Uses Accessibility Tree for field discovery."
         },
         {
-            "name": "register_on_saatchiart",
-            "filepath": "skills\\tools_register_on_saatchiart.py",
-            "description": "*   **Tool Name:** `register_on_saatchiart`\n*   **Description:** Registers a new user on Saatchi Art.\n*   **Inputs:**\n    *   `email` (string): The email address for the new account.\n    *   `password..."
+            "name": "rank_galleries",
+            "filepath": "skills\\tools_rank_galleries.py",
+            "description": "Here's a plan for the `rank_galleries` tool:\n\n**Requirements:**\n\n*   The tool should accept a list of gallery URLs.\n*   The tool should return a ranked list of these galleries based on some criteria (..."
         }
     ]
 }

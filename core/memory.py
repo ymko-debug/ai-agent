@@ -61,7 +61,7 @@ def format_memory_by_namespace(namespaces: list[str], exclude_expired: bool = Tr
     return "\n".join(lines) if lines else ""
 
 
-def format_core_memory_for_prompt(current_query: str = "") -> str:
+def format_core_memory_for_prompt(current_query: str = "", memory_types: list[str] = None) -> str:
     """
     Semantic retrieval: return top-6 facts most relevant to current_query.
     Falls back to full injection if query is empty (e.g. system startup).
@@ -72,7 +72,8 @@ def format_core_memory_for_prompt(current_query: str = "") -> str:
         facts = search_memory_semantic(
             query=current_query,
             limit=6,
-            namespaces=["user", "agent", "task"]   # never inject research: into prompt
+            namespaces=["user", "agent", "task"],   # never inject research: into prompt
+            memory_types=memory_types
         )
     else:
         # Default fallback: recent user/agent facts
@@ -149,7 +150,7 @@ CONVERSATION TO SUMMARIZE:
     summary_messages = [{"role": "user", "content": summarize_prompt}]
     
     try:
-        new_summary, _ = route_llm_fn(summary_messages, task_type="planner")
+        new_summary, _ = route_llm_fn(summary_messages, task_type="summarize")
         save_session_summary(session_id, new_summary)
         
         # Delete the old messages from the DB
@@ -171,7 +172,7 @@ USER MESSAGE: {prompt}
 AGENT ANSWER: {answer}
 
 For each fact, output exactly one JSON object per line:
-{{"namespace": "...", "key": "...", "value": "...", \
+{{"namespace": "...", "key": "...", "value": "...", "memory_type": "...", \
 "confidence": 0.0-1.0, "source": "...", "expires_days": null}}
 
 NAMESPACE RULES — read carefully:
@@ -183,6 +184,11 @@ NAMESPACE RULES — read carefully:
 - "research" → facts about people or companies BEING RESEARCHED.
                A person mentioned IN a user's question is research, NOT the user.
 - "agent"    → things the agent learned about how to do its job better.
+
+MEMORY TYPE RULES — choose the best fit:
+- "procedure"  → how to do something (e.g. "To register on X, use the Y button").
+- "preference" → user likes, dislikes, or formatting choices (e.g. "I prefer tables").
+- "fact"       → general descriptive information (default).
 
 SOURCE VALUES: "user_stated" | "agent_inferred" | "web_scraped"
 CONFIDENCE: user_stated=0.9-1.0, agent_inferred=0.4-0.7, web_scraped=0.6-0.8
